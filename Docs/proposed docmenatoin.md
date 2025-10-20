@@ -145,13 +145,5 @@ while(true){
 
 ---
 
-### Need more help?
 
-Just let me know if you’d like:
 
-* Concrete Java method implementations
-* Arduino/ESP32 code templates
-* Detailed README with build/run instructions
-* Test plan or risk register templates
-
-Happy building!
