@@ -1,24 +1,25 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-#define RXD2 16
-#define TXD2 17
+#define RXD2 16   // ESP32 RX2 (connect to Arduino TX through a divider!)
+#define TXD2 17   // ESP32 TX2 (connect to Arduino RX)
+#define BAUD2 9600
 
-// ========= Config =========
-static const bool USE_AP_MODE = true; // set to false to join your home Wi-Fi (STA)
+// ====== Config ======
+static const bool USE_AP_MODE = true; // true = ESP32 creates AP; false = join STA
 
-// AP credentials
+// AP credentials (if USE_AP_MODE)
 const char* AP_SSID = "BridgeControl-ESP32";
 const char* AP_PASS = "bridge1234";
 
-// STA credentials (only used if USE_AP_MODE == false)
+// STA credentials (if !USE_AP_MODE)
 const char* STA_SSID = "YOUR_WIFI";
 const char* STA_PASS = "YOUR_PASSWORD";
 
-// ========= Server =========
+// ====== HTTP Server ======
 WebServer server(80);
 
-// ---- Put INDEX_HTML BEFORE handleIndex() ----
+// ---- Minimal UI (optional) ----
 static const char INDEX_HTML[] = R"HTML(
 <!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Bridge Control</title>
@@ -35,38 +36,40 @@ static const char INDEX_HTML[] = R"HTML(
 <header><h3>Bridge Control (ESP32)</h3></header>
 <main>
   <div class=row>
-    <button class=primary onclick="sendCmd('FORWARD')">Forward</button>
-    <button class=ghost onclick="sendCmd('BACKWARD')">Backward</button>
-    <button class=ghost onclick="sendCmd('STOP')">Stop</button>
-    <button class=ghost onclick="sendCmd('STATUS')">Status</button>
+    <button class=primary onclick="sendCmd('5')">Forward (5)</button>
+    <button class=ghost   onclick="sendCmd('6')">Backward (6)</button>
+    <button class=ghost   onclick="sendCmd('0')">Stop (0)</button>
+    <button class=ghost   onclick="sendCmd('1')">Auto (1)</button>
+    <button class=ghost   onclick="sendCmd('2')">Manual (2)</button>
+    <button style="background:#b00020;color:#fff" onclick="sendCmd('9')">E-Stop (9)</button>
   </div>
   <pre id=log>Ready…</pre>
 </main>
 <script>
 async function sendCmd(op){
-  const res = await fetch('/cmd', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({op})});
+  const res = await fetch('/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op})});
   const data = await res.json().catch(()=>({}));
   const log = document.getElementById('log');
-  log.textContent = `[${new Date().toLocaleTimeString()}] ${op}\n`+JSON.stringify(data,null,2)+`\n\n`+log.textContent;
+  log.textContent = `[${new Date().toLocaleTimeString()}] sent=${op}\n`+JSON.stringify(data,null,2)+`\n\n`+log.textContent;
 }
 </script>
 )HTML";
 
-// ========= Helpers =========
+// ====== Helpers ======
 String readLineSerial2(uint32_t timeout_ms=1000){
-  String line; uint32_t t0=millis();
-  while (millis()-t0 < timeout_ms){
+  String line; uint32_t t0 = millis();
+  while (millis() - t0 < timeout_ms){
     while (Serial2.available()){
       char c = (char)Serial2.read();
-      if (c=='\n'){ line.trim(); return line; }
-      line += c;
+      if (c == '\n'){ line.trim(); return line; }
+      if (c != '\r') line += c;
     }
     delay(2);
   }
-  line.trim(); return line; // empty on timeout
+  line.trim(); return line; // may be empty (timeout)
 }
 
-// Minimal top-level string extractor: {"op":"FORWARD"}
+// super-light JSON extractor for a top-level string value
 String jsonGetString(const String& body, const char* key){
   int pos = 0;
   while (true){
@@ -75,11 +78,12 @@ String jsonGetString(const String& body, const char* key){
     String k = body.substring(q1+1, q2);
     int colon = body.indexOf(':', q2+1); if (colon < 0) break;
     if (k == key){
+      // value as string "..."
       int vq1 = body.indexOf('"', colon+1); if (vq1 < 0) return "";
       int vq2 = body.indexOf('"', vq1+1); if (vq2 < 0) return "";
       return body.substring(vq1+1, vq2);
     }
-    pos = q2+1;
+    pos = q2 + 1;
   }
   return "";
 }
@@ -90,15 +94,10 @@ void sendCORS(){
   server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// ========= Handlers =========
-void handleIndex(){
-  server.send(200, "text/html", INDEX_HTML);
-}
+// ====== Handlers ======
+void handleIndex(){ server.send(200, "text/html", INDEX_HTML); }
 
-void handleOptions(){
-  sendCORS();
-  server.send(204);
-}
+void handleOptions(){ sendCORS(); server.send(204); }
 
 void handleCmd(){
   sendCORS();
@@ -106,32 +105,34 @@ void handleCmd(){
     server.send(405, "application/json", "{\"ok\":false,\"reason\":\"use POST\"}");
     return;
   }
+
   String body = server.arg("plain");
-  String op = jsonGetString(body, "op");
-  if (op.length()==0){
+  String op = jsonGetString(body, "op");    // expect string "5", "6", ...
+  if (op.length() == 0){
     server.send(400, "application/json", "{\"ok\":false,\"reason\":\"missing op\"}");
     return;
   }
 
-  // Forward to Nano
-  Serial.print("[CMD] "); Serial.println(op);
+  // Forward to Arduino (newline-terminated)
+  Serial.print("[SEND] "); Serial.println(op);
   Serial2.print(op); Serial2.print('\n');
 
-  // Wait reply (one line)
+  // Wait for Arduino one-line ACK/response
   String nano = readLineSerial2(1000);
 
-  // Escape \ and " minimally
-  nano.replace("\\","\\\\"); nano.replace("\"","\\\"");
+  // minimal escaping of \ and "
+  nano.replace("\\", "\\\\"); nano.replace("\"", "\\\"");
+
   String json = String("{\"ok\":") + (nano.length()? "true":"false")
-              + ",\"op\":\"" + op + "\",\"nano_reply\":\"" + nano + "\"}";
+              + ",\"op\":\"" + op + "\""
+              + ",\"nano_reply\":\"" + nano + "\"}";
   server.send(200, "application/json", json);
 }
 
-// ========= Setup / Loop =========
+// ====== Setup / Loop ======
 void setup(){
   Serial.begin(115200);
-  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
-
+  Serial2.begin(BAUD2, SERIAL_8N1, RXD2, TXD2);
   delay(200);
   Serial.println("\n[ESP32] Booting…");
 
@@ -140,17 +141,17 @@ void setup(){
     WiFi.softAP(AP_SSID, AP_PASS);
     Serial.print("[AP] SSID: "); Serial.print(AP_SSID);
     Serial.print("  PASS: "); Serial.println(AP_PASS);
-    Serial.print("Open: http://"); Serial.println(WiFi.softAPIP());
+    Serial.print("[AP] Open: http://"); Serial.println(WiFi.softAPIP());
   } else {
     WiFi.mode(WIFI_STA);
     WiFi.begin(STA_SSID, STA_PASS);
     Serial.print("[STA] Connecting");
-    for (int i=0;i<60 && WiFi.status()!=WL_CONNECTED;i++){ delay(250); Serial.print('.'); }
+    for (int i=0; i<60 && WiFi.status()!=WL_CONNECTED; i++){ delay(250); Serial.print('.'); }
     Serial.println();
     if (WiFi.status()==WL_CONNECTED){
       Serial.print("[STA] IP: "); Serial.println(WiFi.localIP());
     } else {
-      Serial.println("[STA] Failed; fallback to AP");
+      Serial.println("[STA] Failed; falling back to AP");
       WiFi.mode(WIFI_AP);
       WiFi.softAP(AP_SSID, AP_PASS);
       Serial.print("[AP] IP: "); Serial.println(WiFi.softAPIP());
@@ -164,6 +165,4 @@ void setup(){
   Serial.println("[HTTP] Server started");
 }
 
-void loop(){
-  server.handleClient();
-}
+void loop(){ server.handleClient(); }
