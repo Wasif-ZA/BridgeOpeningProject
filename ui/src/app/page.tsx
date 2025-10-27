@@ -1,43 +1,84 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-/** === Numeric command map (match Anna's firmware) === */
+/** === Numeric command map (editable labels happen in UI) ===
+ *  0 is reserved for STOP/Ping.
+ */
 const CMD = {
   STOP: 0,
   AUTO: 1,
   MANUAL: 2,
+  HANDSHAKE: 3,
+  ACKNOWLEDGE: 4,
   FORWARD: 5,
   BACKWARD: 6,
+  BOOMGATE_OPEN: 7,
+  BOOMGATE_CLOSE: 8,
   ESTOP: 9,
 } as const;
 
+type CodeNum = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+
 type LogEntry = {
-  t: string;             // human time
-  epoch: number;         // ms epoch
-  code: number;          // numeric op
-  ms: number;            // round-trip
-  ok: boolean;           // request ok
-  reply: string;         // nano_reply if present
+  t: string;     // human time
+  epoch: number; // ms epoch
+  code: number;  // numeric op
+  ms: number;    // round-trip
+  ok: boolean;   // request ok
+  reply: string; // nano_reply if present
 };
+
+type LabelMap = Record<CodeNum, string>;
+
+const DEFAULT_LABELS: LabelMap = {
+  0: 'STOP / Ping',
+  1: 'AUTO',
+  2: 'MANUAL',
+  3: 'HANDSHAKE',
+  4: 'ACK',
+  5: 'FORWARD',
+  6: 'BACKWARD',
+  7: 'BOOM OPEN',
+  8: 'BOOM CLOSE',
+  9: 'E-STOP',
+};
+
+const LABELS_KEY = 'bridge-ui-labels-v1';
 
 export default function BridgeControl() {
   /** --- UI State --- */
   const [online, setOnline] = useState<boolean>(false);
-  const [mock, setMock] = useState<boolean>(false);       // simulate when HW is away
+  const [mock, setMock] = useState<boolean>(false); // simulate when HW is away
   const [busy, setBusy] = useState<boolean>(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [lastAck, setLastAck] = useState<string>('-');
   const [mode, setMode] = useState<'AUTO' | 'MANUAL' | 'IDLE'>('IDLE');
 
-  /** placeholders for future sensor tiles (safe to keep for Mech handoff) */
-  const [sensors, setSensors] = useState({
-    bridge: 'Idle',     // Open / Moving / Closed / Idle
-    road: 'Clear',      // Clear / Blocked
-    boat: 'Clear',      // Approaching / Cleared
+  // persisted labels 0..9
+  const [labels, setLabels] = useState<LabelMap>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem(LABELS_KEY) : null;
+      if (!raw) return DEFAULT_LABELS;
+      const parsed = JSON.parse(raw) as Partial<LabelMap>;
+      return { ...DEFAULT_LABELS, ...parsed };
+    } catch {
+      return DEFAULT_LABELS;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)); } catch {}
+  }, [labels]);
+  const [showLabelEditor, setShowLabelEditor] = useState(false);
+
+  /** placeholders for future sensor tiles (wire to mech endpoints later) */
+  const [sensors] = useState({
+    bridge: 'Idle', // Open / Moving / Closed / Idle
+    road: 'Clear',  // Clear / Blocked
+    boat: 'Clear',  // Approaching / Cleared
   });
 
-  /** simple interlock demo: disable forward/back if not MANUAL */
+  /** manual interlock: movement (5/6) only in MANUAL */
   const interlockMoveDisabled = mode !== 'MANUAL';
 
   /** --- connectivity ping every 4s (uses STOP=0 as a no-op ping) --- */
@@ -49,7 +90,7 @@ export default function BridgeControl() {
         const r = await fetch('/api/cmd', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ op: String(CMD.STOP) })
+          body: JSON.stringify({ op: String(CMD.STOP) }),
         });
         setOnline(r.ok);
       } catch {
@@ -61,8 +102,25 @@ export default function BridgeControl() {
     return () => { alive = false; };
   }, [mock]);
 
+  /** --- keyboard shortcuts: press 1..9 to fire that code (0 = STOP) --- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (busy) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        const num = Number(e.key) as CodeNum;
+        if ((num === CMD.FORWARD || num === CMD.BACKWARD) && interlockMoveDisabled) return;
+        void sendCode(num);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, interlockMoveDisabled]);
+
   /** --- core send (numeric only) --- */
-  async function sendCode(code: number) {
+  async function sendCode(code: CodeNum) {
     if (busy) return;
     setBusy(true);
     const t0 = performance.now();
@@ -83,7 +141,7 @@ export default function BridgeControl() {
       const res = await fetch('/api/cmd', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: String(code) })
+        body: JSON.stringify({ op: String(code) }),
       });
 
       const ms = Math.round(performance.now() - t0);
@@ -101,14 +159,14 @@ export default function BridgeControl() {
     }
   }
 
-  function postSendSideEffects(code: number, reply: string) {
+  function postSendSideEffects(code: CodeNum, reply: string) {
     setLastAck(reply || '-');
     switch (code) {
       case CMD.AUTO: setMode('AUTO'); break;
       case CMD.MANUAL: setMode('MANUAL'); break;
-      case CMD.STOP: if (mode === 'IDLE') setMode('IDLE'); break;
+      case CMD.STOP: setMode('IDLE'); break;
       case CMD.ESTOP:
-        // briefly lock UI look; you can expand this if Mech exposes a latched state
+        // If firmware latches e-stop, add a latched UI state here.
         break;
     }
   }
@@ -142,6 +200,9 @@ export default function BridgeControl() {
     </span>
   );
 
+  /** keypad order (1..9); 0 is provided in the toolbar as STOP/Ping */
+  const keypadCodes: CodeNum[] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+
   return (
     <div style={styles.page}>
       {/* Sticky E-Stop */}
@@ -151,6 +212,7 @@ export default function BridgeControl() {
           style={styles.estopBtn}
           disabled={busy || disabledControls}
           aria-label="Emergency Stop"
+          title="Hotkey: 9"
         >
           EMERGENCY STOP (9)
         </button>
@@ -166,7 +228,13 @@ export default function BridgeControl() {
               <input type="checkbox" checked={mock} onChange={e => setMock(e.target.checked)} />
               <span>Mock mode</span>
             </label>
+            <button onClick={() => sendCode(CMD.STOP)} style={styles.ghostBtn} disabled={busy || disabledControls} title="Hotkey: 0">
+              {labels[0]} (0)
+            </button>
             <button onClick={exportCSV} style={styles.ghostBtn}>Export CSV</button>
+            <button onClick={() => setShowLabelEditor(s => !s)} style={styles.ghostBtn}>
+              {showLabelEditor ? 'Close Labels' : 'Edit Labels'}
+            </button>
           </div>
         </div>
 
@@ -179,32 +247,56 @@ export default function BridgeControl() {
           <span style={styles.badge}><strong>Last ACK:</strong>&nbsp;{lastAck}</span>
         </div>
 
-        {/* Controls */}
+        {/* QoL buttons */}
         <section style={styles.section}>
           <div style={styles.row}>
-            <BigBtn label={`Auto (${CMD.AUTO})`} onClick={() => sendCode(CMD.AUTO)} disabled={busy || disabledControls} />
-            <BigBtn label={`Manual (${CMD.MANUAL})`} onClick={() => sendCode(CMD.MANUAL)} disabled={busy || disabledControls} />
-            <BigBtn label={`Stop (${CMD.STOP})`} onClick={() => sendCode(CMD.STOP)} disabled={busy || disabledControls} />
+            <BigBtn label={`${labels[1]} (1)`} onClick={() => sendCode(1)} disabled={busy || disabledControls} />
+            <BigBtn label={`${labels[2]} (2)`} onClick={() => sendCode(2)} disabled={busy || disabledControls} />
+            <BigBtn label={`${labels[0]} (0)`} onClick={() => sendCode(0)} disabled={busy || disabledControls} />
           </div>
 
           <div style={styles.row}>
             <BigBtn
-              label={`Forward (${CMD.FORWARD})`}
-              onClick={() => sendCode(CMD.FORWARD)}
+              label={`${labels[5]} (5)`}
+              onClick={() => sendCode(5)}
               primary
               disabled={busy || disabledControls || interlockMoveDisabled}
-              title={interlockMoveDisabled ? 'Blocked by interlock: switch to MANUAL' : ''}
+              title={interlockMoveDisabled ? 'Blocked by interlock: switch to MANUAL' : 'Hotkey: 5'}
             />
             <BigBtn
-              label={`Backward (${CMD.BACKWARD})`}
-              onClick={() => sendCode(CMD.BACKWARD)}
+              label={`${labels[6]} (6)`}
+              onClick={() => sendCode(6)}
               disabled={busy || disabledControls || interlockMoveDisabled}
-              title={interlockMoveDisabled ? 'Blocked by interlock: switch to MANUAL' : ''}
+              title={interlockMoveDisabled ? 'Blocked by interlock: switch to MANUAL' : 'Hotkey: 6'}
             />
           </div>
         </section>
 
-        {/* Sensors (placeholders; wire later when Mech exposes endpoints) */}
+        {/* Numeric keypad 1..9 */}
+        <section>
+          <div style={styles.grid9}>
+            {keypadCodes.map((c) => (
+              <button
+                key={c}
+                style={styles.keyBtn}
+                disabled={busy || disabledControls || ((c === 5 || c === 6) && interlockMoveDisabled)}
+                title={((c === 5 || c === 6) && interlockMoveDisabled) ? 'Blocked by interlock: switch to MANUAL' : `Hotkey: ${c}`}
+                onClick={() => {
+                  if ((c === 5 || c === 6) && interlockMoveDisabled) return;
+                  void sendCode(c);
+                }}
+              >
+                <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1 }}>{c}</div>
+                <div style={{ fontSize: 12.5, opacity: .9, marginTop: 4 }}>{labels[c]}</div>
+              </button>
+            ))}
+          </div>
+          {showLabelEditor && (
+            <LabelEditor labels={labels} onChange={setLabels} />
+          )}
+        </section>
+
+        {/* Sensors (placeholders) */}
         <section style={styles.tiles}>
           <Tile title="Ultrasonic" value="— cm" />
           <Tile title="Load Cell" value="— g" />
@@ -279,6 +371,33 @@ function LogView({ entries }: { entries: LogEntry[] }) {
   );
 }
 
+function LabelEditor({ labels, onChange }: { labels: LabelMap; onChange: (l: LabelMap) => void }) {
+  return (
+    <div style={styles.labelEditor}>
+      <div style={{ fontWeight: 700, marginBottom: 8 }}>Edit command labels (persisted)</div>
+      <div style={styles.labelGrid}>
+        {(Object.keys(labels) as unknown as CodeNum[]).map((k) => (
+          <label key={k} style={styles.labelRow}>
+            <span style={{ width: 28, textAlign: 'right', opacity: .8 }}>{k}</span>
+            <input
+              style={styles.labelInput}
+              value={labels[k]}
+              maxLength={24}
+              onChange={(e) => onChange({ ...labels, [k]: e.target.value })}
+            />
+          </label>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        <button style={styles.ghostBtn} onClick={() => onChange(DEFAULT_LABELS)}>Reset defaults</button>
+      </div>
+      <div style={{ fontSize: 12, opacity: .8, marginTop: 8 }}>
+        Tip: If firmware maps 7/8 differently, rename them here. Movement (5/6) keeps the MANUAL interlock.
+      </div>
+    </div>
+  );
+}
+
 /** === Styles === */
 const styles: Record<string, React.CSSProperties> = {
   page: { fontFamily: 'system-ui, Segoe UI, Arial', background: '#0b0f14', color: '#fff', minHeight: '100dvh' },
@@ -305,6 +424,12 @@ const styles: Record<string, React.CSSProperties> = {
   logMs: { opacity: .8 },
   logCode: { fontWeight: 600 },
   logReply: { opacity: .9 },
+  grid9: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px,1fr))', gap: 10, marginTop: 6 },
+  keyBtn: { padding: 12, borderRadius: 12, background: '#121822', color: '#eaeff7', border: '1px solid #2a3545', textAlign: 'left' },
+  labelEditor: { marginTop: 10, background: '#0f141b', border: '1px solid #223042', borderRadius: 12, padding: 12 },
+  labelGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 },
+  labelRow: { display: 'flex', alignItems: 'center', gap: 8, background: '#0c1117', border: '1px solid #223042', borderRadius: 10, padding: '6px 8px' },
+  labelInput: { flex: 1, background: 'transparent', color: '#eaeff7', border: '1px solid #2a3545', borderRadius: 8, padding: '6px 8px' },
 };
 
 /** === Utils === */
@@ -313,7 +438,7 @@ function ts(epochMs: number) {
   return d.toLocaleTimeString();
 }
 
-function mockReply(code: number) {
+function mockReply(code: CodeNum) {
   switch (code) {
     case CMD.FORWARD: return 'ACK FORWARD';
     case CMD.BACKWARD: return 'ACK BACKWARD';
@@ -321,6 +446,10 @@ function mockReply(code: number) {
     case CMD.AUTO: return 'ACK AUTO';
     case CMD.MANUAL: return 'ACK MANUAL';
     case CMD.ESTOP: return 'ACK ESTOP';
+    case CMD.HANDSHAKE: return 'ACK HELLO';
+    case CMD.ACKNOWLEDGE: return 'ACK OK';
+    case CMD.BOOMGATE_OPEN: return 'ACK BOOM OPEN';
+    case CMD.BOOMGATE_CLOSE: return 'ACK BOOM CLOSE';
     default: return 'ACK';
   }
 }
