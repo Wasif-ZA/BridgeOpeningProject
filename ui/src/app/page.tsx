@@ -2,20 +2,20 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-/** === Numeric command map (editable labels happen in UI) ===
+/** === Numeric command map (matches Arduino switch) ===
  *  0 is reserved for STOP/Ping.
  */
 const CMD = {
   STOP: 0,
   AUTO: 1,
   MANUAL: 2,
-  HANDSHAKE: 3,
-  ACKNOWLEDGE: 4,
-  FORWARD: 5,
-  BACKWARD: 6,
+  ESTOP: 3,
+  RESET: 4,
+  RAISE: 5,
+  LOWER: 6,
   BOOMGATE_OPEN: 7,
   BOOMGATE_CLOSE: 8,
-  ESTOP: 9,
+  RETARE: 9,
 } as const;
 
 type CodeNum = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
@@ -35,40 +35,41 @@ const DEFAULT_LABELS: LabelMap = {
   0: 'STOP / Ping',
   1: 'AUTO',
   2: 'MANUAL',
-  3: 'HANDSHAKE',
-  4: 'ACK',
-  5: 'FORWARD',
-  6: 'BACKWARD',
+  3: 'E-STOP',
+  4: 'RESET',
+  5: 'RAISE',
+  6: 'LOWER',
   7: 'BOOM OPEN',
   8: 'BOOM CLOSE',
-  9: 'E-STOP',
+  9: 'RE-TARE',
 };
 
 const LABELS_KEY = 'bridge-ui-labels-v1';
 
 export default function BridgeControl() {
   /** --- UI State --- */
-  const [online, setOnline] = useState<boolean>(false);
-  const [mock, setMock] = useState<boolean>(false); // simulate when HW is away
-  const [busy, setBusy] = useState<boolean>(false);
+  const [online, setOnline] = useState(false);
+  const [mock, setMock] = useState(false); // simulate when HW is away
+  const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
-  const [lastAck, setLastAck] = useState<string>('-');
+  const [lastAck, setLastAck] = useState('-');
   const [mode, setMode] = useState<'AUTO' | 'MANUAL' | 'IDLE'>('IDLE');
 
-  // persisted labels 0..9
-  const [labels, setLabels] = useState<LabelMap>(() => {
+  // Hydration-safe labels: start with constants, then load localStorage after mount
+  const [labels, setLabels] = useState<LabelMap>(DEFAULT_LABELS);
+  useEffect(() => {
     try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem(LABELS_KEY) : null;
-      if (!raw) return DEFAULT_LABELS;
-      const parsed = JSON.parse(raw) as Partial<LabelMap>;
-      return { ...DEFAULT_LABELS, ...parsed };
-    } catch {
-      return DEFAULT_LABELS;
-    }
-  });
+      const raw = localStorage.getItem(LABELS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<LabelMap>;
+        setLabels(prev => ({ ...prev, ...parsed }));
+      }
+    } catch {}
+  }, []);
   useEffect(() => {
     try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)); } catch {}
   }, [labels]);
+
   const [showLabelEditor, setShowLabelEditor] = useState(false);
 
   /** placeholders for future sensor tiles (wire to mech endpoints later) */
@@ -78,7 +79,7 @@ export default function BridgeControl() {
     boat: 'Clear',  // Approaching / Cleared
   });
 
-  /** manual interlock: movement (5/6) only in MANUAL */
+  /** manual interlock: movement (5/6/7/8) only in MANUAL */
   const interlockMoveDisabled = mode !== 'MANUAL';
 
   /** --- connectivity ping every 4s (uses STOP=0 as a no-op ping) --- */
@@ -111,7 +112,12 @@ export default function BridgeControl() {
       if (e.key >= '0' && e.key <= '9') {
         e.preventDefault();
         const num = Number(e.key) as CodeNum;
-        if ((num === CMD.FORWARD || num === CMD.BACKWARD) && interlockMoveDisabled) return;
+        const needsManual =
+          num === CMD.RAISE ||
+          num === CMD.LOWER ||
+          num === CMD.BOOMGATE_OPEN ||
+          num === CMD.BOOMGATE_CLOSE;
+        if (needsManual && interlockMoveDisabled) return;
         void sendCode(num);
       }
     };
@@ -195,7 +201,7 @@ export default function BridgeControl() {
   /** --- UI helpers --- */
   const disabledControls = !online && !mock;
   const badge = (label: string, value: string) => (
-    <span style={styles.badge}>
+    <span style={styles.badge} suppressHydrationWarning>
       <strong style={{ opacity: .85 }}>{label}:</strong>&nbsp;{value}
     </span>
   );
@@ -212,9 +218,9 @@ export default function BridgeControl() {
           style={styles.estopBtn}
           disabled={busy || disabledControls}
           aria-label="Emergency Stop"
-          title="Hotkey: 9"
+          title="Hotkey: 3"
         >
-          EMERGENCY STOP (9)
+          EMERGENCY STOP (3)
         </button>
       </header>
 
@@ -229,7 +235,7 @@ export default function BridgeControl() {
               <span>Mock mode</span>
             </label>
             <button onClick={() => sendCode(CMD.STOP)} style={styles.ghostBtn} disabled={busy || disabledControls} title="Hotkey: 0">
-              {labels[0]} (0)
+              <span suppressHydrationWarning>{labels[0]} (0)</span>
             </button>
             <button onClick={exportCSV} style={styles.ghostBtn}>Export CSV</button>
             <button onClick={() => setShowLabelEditor(s => !s)} style={styles.ghostBtn}>
@@ -244,7 +250,7 @@ export default function BridgeControl() {
           {badge('Bridge', sensors.bridge)}
           {badge('Road', sensors.road)}
           {badge('Boat', sensors.boat)}
-          <span style={styles.badge}><strong>Last ACK:</strong>&nbsp;{lastAck}</span>
+          <span style={styles.badge} suppressHydrationWarning><strong>Last ACK:</strong>&nbsp;{lastAck}</span>
         </div>
 
         {/* QoL buttons */}
@@ -252,7 +258,7 @@ export default function BridgeControl() {
           <div style={styles.row}>
             <BigBtn label={`${labels[1]} (1)`} onClick={() => sendCode(1)} disabled={busy || disabledControls} />
             <BigBtn label={`${labels[2]} (2)`} onClick={() => sendCode(2)} disabled={busy || disabledControls} />
-            <BigBtn label={`${labels[0]} (0)`} onClick={() => sendCode(0)} disabled={busy || disabledControls} />
+            <BigBtn label={`${labels[4]} (4)`} onClick={() => sendCode(4)} disabled={busy || disabledControls} />
           </div>
 
           <div style={styles.row}>
@@ -275,21 +281,30 @@ export default function BridgeControl() {
         {/* Numeric keypad 1..9 */}
         <section>
           <div style={styles.grid9}>
-            {keypadCodes.map((c) => (
-              <button
-                key={c}
-                style={styles.keyBtn}
-                disabled={busy || disabledControls || ((c === 5 || c === 6) && interlockMoveDisabled)}
-                title={((c === 5 || c === 6) && interlockMoveDisabled) ? 'Blocked by interlock: switch to MANUAL' : `Hotkey: ${c}`}
-                onClick={() => {
-                  if ((c === 5 || c === 6) && interlockMoveDisabled) return;
-                  void sendCode(c);
-                }}
-              >
-                <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1 }}>{c}</div>
-                <div style={{ fontSize: 12.5, opacity: .9, marginTop: 4 }}>{labels[c]}</div>
-              </button>
-            ))}
+            {keypadCodes.map((c) => {
+              const needsManual =
+                c === CMD.RAISE ||
+                c === CMD.LOWER ||
+                c === CMD.BOOMGATE_OPEN ||
+                c === CMD.BOOMGATE_CLOSE;
+              return (
+                <button
+                  key={c}
+                  style={styles.keyBtn}
+                  disabled={busy || disabledControls || (needsManual && interlockMoveDisabled)}
+                  title={(needsManual && interlockMoveDisabled) ? 'Blocked by interlock: switch to MANUAL' : `Hotkey: ${c}`}
+                  onClick={() => {
+                    if (needsManual && interlockMoveDisabled) return;
+                    void sendCode(c);
+                  }}
+                >
+                  <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1 }}>{c}</div>
+                  <div style={{ fontSize: 12.5, opacity: .9, marginTop: 4 }} suppressHydrationWarning>
+                    {labels[c]}
+                  </div>
+                </button>
+              );
+            })}
           </div>
           {showLabelEditor && (
             <LabelEditor labels={labels} onChange={setLabels} />
@@ -392,7 +407,7 @@ function LabelEditor({ labels, onChange }: { labels: LabelMap; onChange: (l: Lab
         <button style={styles.ghostBtn} onClick={() => onChange(DEFAULT_LABELS)}>Reset defaults</button>
       </div>
       <div style={{ fontSize: 12, opacity: .8, marginTop: 8 }}>
-        Tip: If firmware maps 7/8 differently, rename them here. Movement (5/6) keeps the MANUAL interlock.
+        Tip: Movement & boom (5/6/7/8) stay interlocked to MANUAL.
       </div>
     </div>
   );
@@ -440,14 +455,14 @@ function ts(epochMs: number) {
 
 function mockReply(code: CodeNum) {
   switch (code) {
-    case CMD.FORWARD: return 'ACK FORWARD';
-    case CMD.BACKWARD: return 'ACK BACKWARD';
+    case CMD.RAISE: return 'ACK RAISE';
+    case CMD.LOWER: return 'ACK LOWER';
     case CMD.STOP: return 'ACK STOP';
     case CMD.AUTO: return 'ACK AUTO';
     case CMD.MANUAL: return 'ACK MANUAL';
     case CMD.ESTOP: return 'ACK ESTOP';
-    case CMD.HANDSHAKE: return 'ACK HELLO';
-    case CMD.ACKNOWLEDGE: return 'ACK OK';
+    case CMD.RESET: return 'ACK RESET';
+    case CMD.RETARE: return 'ACK RETARE';
     case CMD.BOOMGATE_OPEN: return 'ACK BOOM OPEN';
     case CMD.BOOMGATE_CLOSE: return 'ACK BOOM CLOSE';
     default: return 'ACK';
