@@ -82,25 +82,83 @@ export default function BridgeControl() {
   /** manual interlock: movement (5/6/7/8) only in MANUAL */
   const interlockMoveDisabled = mode !== 'MANUAL';
 
-  /** --- connectivity ping every 4s (uses STOP=0 as a no-op ping) --- */
+  /** --- connectivity ping loop (StrictMode-safe, with abort + backoff, no log noise) --- */
   useEffect(() => {
-    let alive = true;
-    async function ping() {
-      if (mock) { setOnline(true); if (alive) setTimeout(ping, 4000); return; }
+    let disposed = false;
+    let delay = 4000; // start period
+    let inFlight = false;
+    let timerId: number | undefined;
+
+    const schedule = (ms: number) => {
+      if (disposed) return;
+      if (timerId) clearTimeout(timerId);
+      timerId = window.setTimeout(run, ms);
+    };
+
+    const onVisibilityChange = () => {
+      if (disposed) return;
+      // when tab becomes visible, poke the loop immediately
+      if (!document.hidden) schedule(0);
+    };
+
+    const run = async () => {
+      if (disposed) return;
+
+      // Avoid work when tab is hidden; check again soon
+      if (document.hidden) {
+        schedule(1000);
+        return;
+      }
+
+      // Mock path: pretend healthy; fixed cadence
+      if (mock) {
+        setOnline(true);
+        delay = 4000;
+        schedule(delay);
+        return;
+      }
+
+      if (inFlight) { // don't overlap requests
+        schedule(delay);
+        return;
+      }
+
+      inFlight = true;
+      const ctrl = new AbortController();
+      const timeoutMs = 2500;
+      const timeoutId = window.setTimeout(() => ctrl.abort(), timeoutMs);
+
       try {
+        // Use STOP as a no-op ping but call fetch directly (do NOT use sendCode -> no logging)
         const r = await fetch('/api/cmd', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ op: String(CMD.STOP) }),
+          signal: ctrl.signal,
         });
         setOnline(r.ok);
+        // success → reset backoff
+        delay = 4000;
       } catch {
         setOnline(false);
+        // failure → exponential backoff (cap at 30s)
+        delay = Math.min(30000, Math.round(delay * 1.7));
+      } finally {
+        clearTimeout(timeoutId);
+        inFlight = false;
+        schedule(delay);
       }
-      if (alive) setTimeout(ping, 4000);
-    }
-    ping();
-    return () => { alive = false; };
+    };
+
+    // kick off and subscribe to tab visibility
+    schedule(0);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      disposed = true;
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [mock]);
 
   /** --- keyboard shortcuts: press 1..9 to fire that code (0 = STOP) --- */
@@ -137,6 +195,7 @@ export default function BridgeControl() {
       await new Promise(r => setTimeout(r, 120));
       const ms = Math.round(performance.now() - t0);
       const reply = mockReply(code);
+      // Log manual STOPs, but not ping (pings never reach here anyway)
       pushLog({ t: ts(now), epoch: now, code, ms, ok: true, reply });
       postSendSideEffects(code, reply);
       setBusy(false);
