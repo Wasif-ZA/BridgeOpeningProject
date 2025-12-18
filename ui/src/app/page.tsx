@@ -1,529 +1,730 @@
-'use client';
+import Link from "next/link";
+import React from "react";
 
-import { useEffect, useRef, useState } from 'react';
-
-/** === Numeric command map (matches Arduino switch) ===
- *  0 is reserved for STOP/Ping.
- */
-const CMD = {
-  STOP: 0,
-  AUTO: 1,
-  MANUAL: 2,
-  ESTOP: 3,
-  RESET: 4,
-  RAISE: 5,
-  LOWER: 6,
-  BOOMGATE_OPEN: 7,
-  BOOMGATE_CLOSE: 8,
-  RETARE: 9,
-} as const;
-
-type CodeNum = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
-
-type LogEntry = {
-  t: string;     // human time
-  epoch: number; // ms epoch
-  code: number;  // numeric op
-  ms: number;    // round-trip
-  ok: boolean;   // request ok
-  reply: string; // nano_reply if present
+export const metadata = {
+  title: "Project Demonstration | Bridge Opening Project",
+  description: "Overview of how the Bridge Opening Project works end-to-end.",
 };
 
-type LabelMap = Record<CodeNum, string>;
-
-const DEFAULT_LABELS: LabelMap = {
-  0: 'STOP / Ping',
-  1: 'AUTO',
-  2: 'MANUAL',
-  3: 'E-STOP',
-  4: 'RESET',
-  5: 'RAISE',
-  6: 'LOWER',
-  7: 'BOOM OPEN',
-  8: 'BOOM CLOSE',
-  9: 'RE-TARE',
-};
-
-const LABELS_KEY = 'bridge-ui-labels-v1';
-
-export default function BridgeControl() {
-  /** --- UI State --- */
-  const [online, setOnline] = useState(false);
-  const [mock, setMock] = useState(false); // simulate when HW is away
-  const [busy, setBusy] = useState(false);
-  const [log, setLog] = useState<LogEntry[]>([]);
-  const [lastAck, setLastAck] = useState('-');
-  const [mode, setMode] = useState<'AUTO' | 'MANUAL' | 'IDLE'>('IDLE');
-
-  // Hydration-safe labels: start with constants, then load localStorage after mount
-  const [labels, setLabels] = useState<LabelMap>(DEFAULT_LABELS);
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LABELS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<LabelMap>;
-        setLabels(prev => ({ ...prev, ...parsed }));
-      }
-    } catch {}
-  }, []);
-  useEffect(() => {
-    try { localStorage.setItem(LABELS_KEY, JSON.stringify(labels)); } catch {}
-  }, [labels]);
-
-  const [showLabelEditor, setShowLabelEditor] = useState(false);
-
-  /** placeholders for future sensor tiles (wire to mech endpoints later) */
-  const [sensors] = useState({
-    bridge: 'Idle', // Open / Moving / Closed / Idle
-    road: 'Clear',  // Clear / Blocked
-    boat: 'Clear',  // Approaching / Cleared
-  });
-
-  /** manual interlock: movement (5/6/7/8) only in MANUAL */
-  const interlockMoveDisabled = mode !== 'MANUAL';
-
-  /** --- connectivity ping loop (StrictMode-safe, with abort + backoff, no log noise) --- */
-  useEffect(() => {
-    let disposed = false;
-    let delay = 4000; // start period
-    let inFlight = false;
-    let timerId: number | undefined;
-
-    const schedule = (ms: number) => {
-      if (disposed) return;
-      if (timerId) clearTimeout(timerId);
-      timerId = window.setTimeout(run, ms);
-    };
-
-    const onVisibilityChange = () => {
-      if (disposed) return;
-      // when tab becomes visible, poke the loop immediately
-      if (!document.hidden) schedule(0);
-    };
-
-    const run = async () => {
-      if (disposed) return;
-
-      // Avoid work when tab is hidden; check again soon
-      if (document.hidden) {
-        schedule(1000);
-        return;
-      }
-
-      // Mock path: pretend healthy; fixed cadence
-      if (mock) {
-        setOnline(true);
-        delay = 4000;
-        schedule(delay);
-        return;
-      }
-
-      if (inFlight) { // don't overlap requests
-        schedule(delay);
-        return;
-      }
-
-      inFlight = true;
-      const ctrl = new AbortController();
-      const timeoutMs = 2500;
-      const timeoutId = window.setTimeout(() => ctrl.abort(), timeoutMs);
-
-      try {
-        // Use STOP as a no-op ping but call fetch directly (do NOT use sendCode -> no logging)
-        const r = await fetch('/api/cmd', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ op: String(CMD.STOP) }),
-          signal: ctrl.signal,
-        });
-        setOnline(r.ok);
-        // success → reset backoff
-        delay = 4000;
-      } catch {
-        setOnline(false);
-        // failure → exponential backoff (cap at 30s)
-        delay = Math.min(30000, Math.round(delay * 1.7));
-      } finally {
-        clearTimeout(timeoutId);
-        inFlight = false;
-        schedule(delay);
-      }
-    };
-
-    // kick off and subscribe to tab visibility
-    schedule(0);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-
-    return () => {
-      disposed = true;
-      if (timerId) clearTimeout(timerId);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [mock]);
-
-  /** --- keyboard shortcuts: press 1..9 to fire that code (0 = STOP) --- */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (busy) return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.key >= '0' && e.key <= '9') {
-        e.preventDefault();
-        const num = Number(e.key) as CodeNum;
-        const needsManual =
-          num === CMD.RAISE ||
-          num === CMD.LOWER ||
-          num === CMD.BOOMGATE_OPEN ||
-          num === CMD.BOOMGATE_CLOSE;
-        if (needsManual && interlockMoveDisabled) return;
-        void sendCode(num);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [busy, interlockMoveDisabled]);
-
-  /** --- core send (numeric only) --- */
-  async function sendCode(code: CodeNum) {
-    if (busy) return;
-    setBusy(true);
-    const t0 = performance.now();
-    const now = Date.now();
-
-    // mock path (for demos without hardware)
-    if (mock) {
-      await new Promise(r => setTimeout(r, 120));
-      const ms = Math.round(performance.now() - t0);
-      const reply = mockReply(code);
-      // Log manual STOPs, but not ping (pings never reach here anyway)
-      pushLog({ t: ts(now), epoch: now, code, ms, ok: true, reply });
-      postSendSideEffects(code, reply);
-      setBusy(false);
-      return;
-    }
-
-    try {
-      const res = await fetch('/api/cmd', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: String(code) }),
-      });
-
-      const ms = Math.round(performance.now() - t0);
-      const j = await res.json().catch(() => ({} as any));
-      const ok = res.ok && (j?.ok ?? true);
-      const reply: string = j?.esp32?.nano_reply ?? j?.nano_reply ?? '';
-
-      pushLog({ t: ts(now), epoch: now, code, ms, ok, reply });
-      postSendSideEffects(code, reply);
-    } catch (e) {
-      const ms = Math.round(performance.now() - t0);
-      pushLog({ t: ts(now), epoch: now, code, ms, ok: false, reply: String(e) });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function postSendSideEffects(code: CodeNum, reply: string) {
-    setLastAck(reply || '-');
-    switch (code) {
-      case CMD.AUTO: setMode('AUTO'); break;
-      case CMD.MANUAL: setMode('MANUAL'); break;
-      case CMD.STOP: setMode('IDLE'); break;
-      case CMD.ESTOP:
-        // If firmware latches e-stop, add a latched UI state here.
-        break;
-    }
-  }
-
-  function pushLog(entry: LogEntry) {
-    setLog(prev => [entry, ...prev].slice(0, 500)); // keep last 500
-  }
-
-  /** --- CSV export of the log --- */
-  function exportCSV() {
-    const header = 'time,epoch_ms,code,ms,ok,reply\n';
-    const rows = log
-      .slice()
-      .reverse()
-      .map(e => `${e.t},${e.epoch},${e.code},${e.ms},${e.ok ? '1' : '0'},"${(e.reply || '').replace(/"/g, '""')}"`)
-      .join('\n');
-
-    const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `bridge-ui-log-${new Date().toISOString().slice(0,19)}.csv`;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  /** --- UI helpers --- */
-  const disabledControls = !online && !mock;
-  const badge = (label: string, value: string) => (
-    <span style={styles.badge} suppressHydrationWarning>
-      <strong style={{ opacity: .85 }}>{label}:</strong>&nbsp;{value}
-    </span>
-  );
-
-  /** keypad order (1..9); 0 is provided in the toolbar as STOP/Ping */
-  const keypadCodes: CodeNum[] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-
+export default function DemoPage() {
   return (
     <div style={styles.page}>
-      {/* Sticky E-Stop */}
-      <header style={styles.estopBar}>
-        <button
-          onClick={() => sendCode(CMD.ESTOP)}
-          style={styles.estopBtn}
-          disabled={busy || disabledControls}
-          aria-label="Emergency Stop"
-          title="Hotkey: 3"
-        >
-          EMERGENCY STOP (3)
-        </button>
-      </header>
+      <style>{`
+        :root{
+          --bp:#061a2b;          /* blueprint base */
+          --ink:#d9f2ff;         /* blueprint text */
+          --muted:#8fb6c8;       /* blueprint secondary */
+          --panel:#041625;       /* panel base */
+          --panel2:#03101c;      /* darker */
+          --line:#1c3b52;        /* strokes */
+          --accent:#ffd400;      /* hazard */
+          --accent2:#00e5ff;     /* cyan */
+          --danger:#ff3b3b;
+        }
 
-      {/* Title + toolbar */}
+        /* Blueprint background */
+        .bp-grid {
+          background:
+            radial-gradient(circle at 20% 10%, rgba(0,229,255,0.10), transparent 40%),
+            radial-gradient(circle at 85% 18%, rgba(255,212,0,0.10), transparent 45%),
+            linear-gradient(transparent 31px, rgba(0,229,255,0.07) 32px),
+            linear-gradient(90deg, transparent 31px, rgba(0,229,255,0.07) 32px),
+            linear-gradient(transparent 7px, rgba(0,229,255,0.04) 8px),
+            linear-gradient(90deg, transparent 7px, rgba(0,229,255,0.04) 8px);
+          background-size: auto, auto, 32px 32px, 32px 32px, 8px 8px, 8px 8px;
+        }
+
+        /* Grain */
+        .grain {
+          background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
+          background-size: 3px 3px;
+          mix-blend-mode: overlay;
+          opacity: 0.35;
+        }
+
+        /* Panel frame */
+        .panel {
+          position: relative;
+          border: 1px solid rgba(0,229,255,0.18);
+          background: linear-gradient(180deg, rgba(4,22,37,0.92), rgba(3,16,28,0.92));
+          box-shadow:
+            0 0 0 1px rgba(0,0,0,0.45) inset,
+            0 10px 0 rgba(0,0,0,0.25),
+            0 18px 50px rgba(0,0,0,0.45);
+          border-radius: 12px;
+          overflow: hidden;
+        }
+        .panel:before{
+          content:"";
+          position:absolute;
+          inset:10px;
+          border: 1px dashed rgba(255,255,255,0.08);
+          pointer-events:none;
+          border-radius: 10px;
+        }
+        .bolt{
+          width:10px;height:10px;border-radius:3px;
+          background: rgba(255,255,255,0.08);
+          border: 1px solid rgba(0,229,255,0.18);
+          box-shadow: 0 0 0 1px rgba(0,0,0,0.45) inset;
+          position:absolute;
+        }
+        .b1{ top:12px; left:12px; }
+        .b2{ top:12px; right:12px; }
+        .b3{ bottom:12px; left:12px; }
+        .b4{ bottom:12px; right:12px; }
+
+        /* Engineering header strip */
+        .strip{
+          display:flex; align-items:center; justify-content:space-between;
+          gap:12px;
+          padding: 10px 12px;
+          border: 1px solid rgba(0,229,255,0.18);
+          background: linear-gradient(90deg, rgba(0,229,255,0.09), rgba(255,212,0,0.06));
+        }
+        .strip small{
+          color: rgba(143,182,200,0.95);
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          font-weight: 800;
+          font-size: 11px;
+        }
+        .led { display:flex; gap:8px; align-items:center; }
+        .dot{
+          width:9px;height:9px;border-radius:999px;
+          background: rgba(0,229,255,0.35);
+          box-shadow: 0 0 12px rgba(0,229,255,0.35);
+          border: 1px solid rgba(255,255,255,0.10);
+        }
+        .dot.warn{
+          background: rgba(255,212,0,0.55);
+          box-shadow: 0 0 12px rgba(255,212,0,0.35);
+        }
+
+        /* ✅ Hazard primary button (CLEAN: stripes ONLY on border) */
+        a.hazard{
+          position: relative;
+          border-radius: 8px;
+          padding: 12px 16px;
+          text-decoration: none;
+          font-weight: 900;
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+
+          border: 2px solid transparent;
+          background:
+            linear-gradient(180deg, rgba(255,212,0,1), rgba(255,212,0,0.92)) padding-box,
+            repeating-linear-gradient(
+              135deg,
+              rgba(255,212,0,1) 0px,
+              rgba(255,212,0,1) 10px,
+              rgba(0,0,0,0.90) 10px,
+              rgba(0,0,0,0.90) 20px
+            ) border-box;
+
+          color: #07121b;
+          box-shadow:
+            0 10px 0 rgba(0,0,0,0.35),
+            0 24px 50px rgba(0,0,0,0.35);
+          transform: translateY(0);
+          transition: transform 0.15s ease, filter 0.15s ease;
+        }
+        a.hazard:hover { transform: translateY(-1px); filter: brightness(1.03); }
+        a.hazard:active { transform: translateY(0px); filter: brightness(0.97); }
+
+        a.ghost {
+          background: rgba(0,229,255,0.06);
+          border: 1px solid rgba(0,229,255,0.22);
+          transition: transform 0.15s ease, background 0.15s ease;
+          border-radius: 8px;
+        }
+        a.ghost:hover{ transform: translateY(-1px); background: rgba(0,229,255,0.10); }
+        a.ghost:active{ transform: translateY(0px); }
+
+        /* Keypad */
+        .keypad:hover { border-color: rgba(0,229,255,0.28); }
+        .keycap {
+          box-shadow:
+            0 2px 0 rgba(255,255,255,0.05) inset,
+            0 10px 0 rgba(0,0,0,0.45);
+        }
+
+        /* Link rows */
+        a.row:hover { background: rgba(0,229,255,0.08); transform: translateY(-1px); }
+        a.row:active { transform: translateY(0px); }
+
+        /* Focus */
+        a:focus-visible{ outline: 2px solid rgba(255,212,0,0.70); outline-offset: 3px; border-radius: 10px; }
+
+        .draft-title {
+          text-shadow: 0 0 18px rgba(0,229,255,0.12);
+          letter-spacing: -0.02em;
+        }
+      `}</style>
+
+      <div style={styles.bg} className="bp-grid" />
+      <div style={styles.grain} className="grain" />
+
       <div style={styles.wrap}>
-        <div style={styles.toolbar}>
-          <h2 style={{ margin: 0 }}>Bridge Control (UNO)</h2>
-          <div style={styles.toolbarRight}>
-            <StatusDot ok={online || mock} label={mock ? 'Mock' : (online ? 'Online' : 'Offline')} />
-            <label style={styles.switchLabel}>
-              <input type="checkbox" checked={mock} onChange={e => setMock(e.target.checked)} />
-              <span>Mock mode</span>
-            </label>
-            <button onClick={() => sendCode(CMD.STOP)} style={styles.ghostBtn} disabled={busy || disabledControls} title="Hotkey: 0">
-              <span suppressHydrationWarning>{labels[0]} (0)</span>
-            </button>
-            <button onClick={exportCSV} style={styles.ghostBtn}>Export CSV</button>
-            <button onClick={() => setShowLabelEditor(s => !s)} style={styles.ghostBtn}>
-              {showLabelEditor ? 'Close Labels' : 'Edit Labels'}
-            </button>
-          </div>
-        </div>
-
-        {/* Live status strip */}
-        <div style={styles.statusStrip}>
-          {badge('Mode', mode)}
-          {badge('Bridge', sensors.bridge)}
-          {badge('Road', sensors.road)}
-          {badge('Boat', sensors.boat)}
-          <span style={styles.badge} suppressHydrationWarning><strong>Last ACK:</strong>&nbsp;{lastAck}</span>
-        </div>
-
-        {/* QoL buttons */}
-        <section style={styles.section}>
-          <div style={styles.row}>
-            <BigBtn label={`${labels[1]} (1)`} onClick={() => sendCode(1)} disabled={busy || disabledControls} />
-            <BigBtn label={`${labels[2]} (2)`} onClick={() => sendCode(2)} disabled={busy || disabledControls} />
-            <BigBtn label={`${labels[4]} (4)`} onClick={() => sendCode(4)} disabled={busy || disabledControls} />
+        <header style={styles.header}>
+          <div style={styles.stampWrap}>
+            <div style={styles.stamp}>
+              <div style={styles.stampTop}>ENGINEERING DEMO</div>
+              <div style={styles.stampMid}>BRIDGE OPENING PROJECT</div>
+              <div style={styles.stampBot}>SYSTEM DOC • v1.0</div>
+            </div>
           </div>
 
-          <div style={styles.row}>
-            <BigBtn
-              label={`${labels[5]} (5)`}
-              onClick={() => sendCode(5)}
-              primary
-              disabled={busy || disabledControls || interlockMoveDisabled}
-              title={interlockMoveDisabled ? 'Blocked by interlock: switch to MANUAL' : 'Hotkey: 5'}
-            />
-            <BigBtn
-              label={`${labels[6]} (6)`}
-              onClick={() => sendCode(6)}
-              disabled={busy || disabledControls || interlockMoveDisabled}
-              title={interlockMoveDisabled ? 'Blocked by interlock: switch to MANUAL' : 'Hotkey: 6'}
-            />
+          <h1 style={styles.title} className="draft-title">
+            Bridge Opening <span style={{ color: "var(--accent2)" }}>Control</span>{" "}
+            Overview
+          </h1>
+
+          <p style={styles.subtitle}>
+            Full-stack IoT control chain: <strong>Next.js</strong> (Edge) →{" "}
+            <strong>ESP32</strong> (Gateway) → <strong>Arduino</strong> (Actuator)
+          </p>
+
+          <div style={styles.btnRow}>
+            {/* ✅ className hazard does all the styling; inline style does NOT set background */}
+            <Link href="/control" className="hazard" style={styles.btnPrimary}>
+              <span style={{ fontSize: 18 }}>🎛️</span>
+              <span>Launch Control Panel</span>
+            </Link>
+
+            <a
+              href="https://github.com/Wasif-ZA/BridgeOpeningProject"
+              target="_blank"
+              rel="noreferrer"
+              className="ghost"
+              style={styles.btnSecondary}
+            >
+              <span>View Source Code</span>
+              <span style={{ opacity: 0.85 }}>↗</span>
+            </a>
+          </div>
+
+          <div style={styles.meterRow}>
+            <Meter label="LINK" value="ONLINE" tone="cyan" />
+            <Meter label="MODE" value="MANUAL INTERLOCK" tone="amber" />
+            <Meter label="ACK" value="READY" tone="cyan" />
+          </div>
+        </header>
+
+        {/* ARCHITECTURE */}
+        <section style={styles.panel} className="panel">
+          <div className="bolt b1" />
+          <div className="bolt b2" />
+          <div className="bolt b3" />
+          <div className="bolt b4" />
+
+          <div className="strip">
+            <small>SECTION A • SYSTEM ARCHITECTURE</small>
+            <div className="led">
+              <span className="dot" />
+              <span className="dot warn" />
+              <span className="dot" />
+            </div>
+          </div>
+
+          <div style={styles.panelBody}>
+            <div style={styles.panelTitleRow}>
+              <div style={styles.icon}>🏗️</div>
+              <div>
+                <h2 style={styles.h2}>Schematic Data Flow</h2>
+                <p style={styles.desc}>From user input → edge → gateway → actuation.</p>
+              </div>
+            </div>
+
+            <div style={styles.diagramFrame}>
+              <ArchitectureSvg />
+            </div>
+
+            <div style={styles.badges}>
+              <Badge icon="🌐" label="Frontend" value="Next.js App Router" />
+              <Badge icon="⚡" label="Edge API" value="/api/cmd Proxy" />
+              <Badge icon="📡" label="Gateway" value="ESP32 HTTP" />
+              <Badge icon="⚙️" label="Driver" value="Arduino UNO" />
+            </div>
           </div>
         </section>
 
-        {/* Numeric keypad 1..9 */}
-        <section>
-          <div style={styles.grid9}>
-            {keypadCodes.map((c) => {
-              const needsManual =
-                c === CMD.RAISE ||
-                c === CMD.LOWER ||
-                c === CMD.BOOMGATE_OPEN ||
-                c === CMD.BOOMGATE_CLOSE;
-              return (
-                <button
-                  key={c}
-                  style={styles.keyBtn}
-                  disabled={busy || disabledControls || (needsManual && interlockMoveDisabled)}
-                  title={(needsManual && interlockMoveDisabled) ? 'Blocked by interlock: switch to MANUAL' : `Hotkey: ${c}`}
-                  onClick={() => {
-                    if (needsManual && interlockMoveDisabled) return;
-                    void sendCode(c);
-                  }}
-                >
-                  <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1 }}>{c}</div>
-                  <div style={{ fontSize: 12.5, opacity: .9, marginTop: 4 }} suppressHydrationWarning>
-                    {labels[c]}
+        {/* COMMAND PROTOCOL */}
+        <section style={styles.panel} className="panel">
+          <div className="bolt b1" />
+          <div className="bolt b2" />
+          <div className="bolt b3" />
+          <div className="bolt b4" />
+
+          <div className="strip">
+            <small>SECTION B • COMMAND PROTOCOL</small>
+            <div className="led">
+              <span className="dot warn" />
+              <span className="dot" />
+              <span className="dot warn" />
+            </div>
+          </div>
+
+          <div style={styles.panelBody}>
+            <div style={styles.panelTitleRow}>
+              <div style={styles.icon}>🎮</div>
+              <div>
+                <h2 style={styles.h2}>Numeric Op-Codes</h2>
+                <p style={styles.desc}>Firmware state machine receives 0–9 over UART.</p>
+              </div>
+            </div>
+
+            <div style={styles.keypadGrid}>
+              {[
+                { code: 0, label: "STOP / IDLE", color: "rgba(143,182,200,0.9)" },
+                { code: 1, label: "AUTO MODE", color: "rgba(0,229,255,0.95)" },
+                { code: 2, label: "MANUAL MODE", color: "rgba(255,212,0,0.95)" },
+                { code: 3, label: "EMERGENCY STOP", color: "rgba(255,59,59,0.95)" },
+                { code: 4, label: "SYSTEM RESET", color: "rgba(189,147,249,0.95)" },
+                { code: 5, label: "BRIDGE RAISE", color: "rgba(72,245,180,0.95)" },
+                { code: 6, label: "BRIDGE LOWER", color: "rgba(255,163,87,0.95)" },
+                { code: 7, label: "BOOM OPEN", color: "rgba(120,180,255,0.95)" },
+                { code: 8, label: "BOOM CLOSE", color: "rgba(120,180,255,0.95)" },
+                { code: 9, label: "SCALE RE-TARE", color: "rgba(255,120,205,0.95)" },
+              ].map((cmd) => (
+                <div key={cmd.code} style={styles.keypadCell} className="keypad">
+                  <div
+                    style={{
+                      ...styles.keycap,
+                      borderColor: cmd.color,
+                      color: "var(--ink)",
+                    }}
+                    className="keycap"
+                  >
+                    <div style={styles.keycapTop}>{cmd.code}</div>
+                    <div style={{ ...styles.keycapLine, background: cmd.color }} />
                   </div>
-                </button>
-              );
-            })}
+                  <div style={styles.keyLabel}>{cmd.label}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={styles.notice}>
+              <div style={styles.noticeIcon}>⚠️</div>
+              <div>
+                <div style={styles.noticeTitle}>Manual Interlock</div>
+                <div style={styles.noticeText}>
+                  Commands <strong>5–9</strong> are ignored unless system is in{" "}
+                  <strong>MANUAL (2)</strong> mode.
+                </div>
+              </div>
+            </div>
           </div>
-          {showLabelEditor && (
-            <LabelEditor labels={labels} onChange={setLabels} />
-          )}
         </section>
 
-        {/* Sensors (placeholders) */}
-        <section style={styles.tiles}>
-          <Tile title="Ultrasonic" value="— cm" />
-          <Tile title="Load Cell" value="— g" />
-          <Tile title="Limit Switch" value="—" />
+        {/* TWO COLUMN */}
+        <div style={styles.twoCol}>
+          <section style={styles.panel} className="panel">
+            <div className="bolt b1" />
+            <div className="bolt b2" />
+            <div className="bolt b3" />
+            <div className="bolt b4" />
+
+            <div className="strip">
+              <small>SECTION C • INTERACTION LOOP</small>
+              <div className="led">
+                <span className="dot" />
+                <span className="dot" />
+                <span className="dot warn" />
+              </div>
+            </div>
+
+            <div style={styles.panelBody}>
+              <h2 style={styles.h2}>📡 Request → Actuation → ACK</h2>
+
+              <div style={styles.timeline}>
+                {[
+                  { title: "User Input", desc: "Click or Hotkey (0–9) on UI." },
+                  { title: "Edge Proxy", desc: "POST /api/cmd validates payload." },
+                  { title: "WiFi Request", desc: "Forwarded to ESP32 over HTTP." },
+                  { title: "Serial Bus", desc: "ESP32 relays byte to UNO via UART." },
+                  { title: "Actuation", desc: "UNO drives motors/relays." },
+                  { title: "Feedback", desc: "ACK response bubbles back to UI." },
+                ].map((step, i) => (
+                  <div key={i} style={styles.tRow}>
+                    <div style={styles.tIdx}>{String(i + 1).padStart(2, "0")}</div>
+                    <div>
+                      <div style={styles.tTitle}>{step.title}</div>
+                      <div style={styles.tDesc}>{step.desc}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+            <section style={styles.panel} className="panel">
+              <div className="bolt b1" />
+              <div className="bolt b2" />
+              <div className="bolt b3" />
+              <div className="bolt b4" />
+
+              <div className="strip">
+                <small>SECTION D • SIMULATION</small>
+                <div className="led">
+                  <span className="dot warn" />
+                  <span className="dot warn" />
+                  <span className="dot" />
+                </div>
+              </div>
+
+              <div style={styles.panelBody}>
+                <h2 style={styles.h2}>🧪 Mock Mode</h2>
+                <p style={styles.p}>
+                  No hardware connected? Enable <strong>Simulation Mode</strong> in the toolbar.
+                </p>
+                <p style={styles.small}>
+                  The UI intercepts requests and returns synthetic ACK signals, letting you test
+                  interface logic without the physical bridge.
+                </p>
+              </div>
+            </section>
+
+            <section style={styles.panel} className="panel">
+              <div className="bolt b1" />
+              <div className="bolt b2" />
+              <div className="bolt b3" />
+              <div className="bolt b4" />
+
+              <div className="strip">
+                <small>SECTION E • QUICK LINKS</small>
+                <div className="led">
+                  <span className="dot" />
+                  <span className="dot" />
+                  <span className="dot" />
+                </div>
+              </div>
+
+              <div style={styles.panelBody}>
+                <div style={styles.linkList}>
+                  <a
+                    style={styles.linkRow}
+                    className="row"
+                    href="https://github.com/Wasif-ZA/BridgeOpeningProject/tree/main/ui"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <span>📦 UI Repository</span>
+                    <span style={styles.arrow}>→</span>
+                  </a>
+                  <a
+                    style={styles.linkRow}
+                    className="row"
+                    href="https://github.com/Wasif-ZA/BridgeOpeningProject/tree/main/Audrino"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <span>🔌 Firmware Source</span>
+                    <span style={styles.arrow}>→</span>
+                  </a>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        {/* DEPLOYMENT */}
+        <section style={styles.panel} className="panel">
+          <div className="bolt b1" />
+          <div className="bolt b2" />
+          <div className="bolt b3" />
+          <div className="bolt b4" />
+
+          <div className="strip">
+            <small>SECTION F • DEPLOYMENT GUIDE</small>
+            <div className="led">
+              <span className="dot" />
+              <span className="dot warn" />
+              <span className="dot" />
+            </div>
+          </div>
+
+          <div style={styles.panelBody}>
+            <div style={styles.panelTitleRow}>
+              <div style={styles.icon}>🚀</div>
+              <div>
+                <h2 style={styles.h2}>Bring-Up Steps</h2>
+                <p style={styles.desc}>Env → flash → wiring → live control.</p>
+              </div>
+            </div>
+
+            <div style={styles.steps}>
+              <Step n="01" title="Environment">
+                Set <code style={styles.code}>ESP32_BASE_URL</code> in{" "}
+                <code style={styles.code}>.env.local</code> to the device static IP.
+              </Step>
+              <Step n="02" title="ESP32 Flash">
+                Upload sketch from <code style={styles.code}>/Arduino/esp32</code>. Ensure Wi-Fi creds are correct.
+              </Step>
+              <Step n="03" title="UNO Upload">
+                Flash the logic controller. Connect Tx/Rx pins between boards.
+              </Step>
+            </div>
+          </div>
         </section>
 
-        {/* Log */}
-        <section>
-          <div style={styles.logHeader}>
-            <strong>Command Log</strong>
-            <small style={{ opacity: .7 }}> newest first</small>
-          </div>
-          <LogView entries={log} />
-        </section>
+        <footer style={styles.footer}>
+          <div>Bridge Opening Project © {new Date().getFullYear()}</div>
+          <div style={{ opacity: 0.7 }}>Blueprint/HMI theme • technical documentation page</div>
+        </footer>
       </div>
     </div>
   );
 }
 
-/** === Components === */
+/* ========= Subcomponents ========= */
 
-function BigBtn(props: { label: string; onClick: () => void; disabled?: boolean; primary?: boolean; title?: string }) {
-  const base = props.primary ? styles.primaryBtn : styles.ghostBtn;
+function Meter({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: "cyan" | "amber";
+}) {
+  const color = tone === "amber" ? "var(--accent)" : "var(--accent2)";
   return (
-    <button onClick={props.onClick} disabled={props.disabled} style={base} title={props.title}>
-      {props.label}
-    </button>
-  );
-}
-
-function StatusDot({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <span style={styles.dotWrap}>
-      <span style={{ ...styles.dot, background: ok ? '#20c997' : '#b00020' }} />
-      <span>{label}</span>
-    </span>
-  );
-}
-
-function Tile({ title, value }: { title: string; value: string }) {
-  return (
-    <div style={styles.card}>
-      <div style={{ fontSize: 13, opacity: .8 }}>{title}</div>
-      <div style={{ fontSize: 22, fontWeight: 700, marginTop: 6 }}>{value}</div>
+    <div style={styles.meter}>
+      <div style={styles.meterLabel}>{label}</div>
+      <div style={{ ...styles.meterValue, borderColor: color, color }}>{value}</div>
     </div>
   );
 }
 
-function LogView({ entries }: { entries: LogEntry[] }) {
-  const boxRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    // keep height stable; content overflows scroll
-    if (boxRef.current) boxRef.current.scrollTop = 0;
-  }, [entries.length]);
-
+function Badge({ icon, label, value }: { icon: string; label: string; value: string }) {
   return (
-    <div ref={boxRef} style={styles.logBox} aria-live="polite">
-      {entries.length === 0 ? (
-        <div style={{ opacity: .7 }}>No commands yet.</div>
-      ) : (
-        entries.map((e, i) => (
-          <div key={i} style={styles.logRow}>
-            <span style={styles.logTime}>{e.t}</span>
-            <span style={styles.logMs}>{e.ms}ms</span>
-            <span style={styles.logCode}>code={e.code}</span>
-            <span style={{ color: e.ok ? '#20c997' : '#ff6b6b' }}>{e.ok ? 'ok' : 'err'}</span>
-            {e.reply ? <span style={styles.logReply}>reply: {e.reply}</span> : null}
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
-function LabelEditor({ labels, onChange }: { labels: LabelMap; onChange: (l: LabelMap) => void }) {
-  return (
-    <div style={styles.labelEditor}>
-      <div style={{ fontWeight: 700, marginBottom: 8 }}>Edit command labels (persisted)</div>
-      <div style={styles.labelGrid}>
-        {(Object.keys(labels) as unknown as CodeNum[]).map((k) => (
-          <label key={k} style={styles.labelRow}>
-            <span style={{ width: 28, textAlign: 'right', opacity: .8 }}>{k}</span>
-            <input
-              style={styles.labelInput}
-              value={labels[k]}
-              maxLength={24}
-              onChange={(e) => onChange({ ...labels, [k]: e.target.value })}
-            />
-          </label>
-        ))}
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        <button style={styles.ghostBtn} onClick={() => onChange(DEFAULT_LABELS)}>Reset defaults</button>
-      </div>
-      <div style={{ fontSize: 12, opacity: .8, marginTop: 8 }}>
-        Tip: Movement & boom (5/6/7/8) stay interlocked to MANUAL.
+    <div style={styles.badge}>
+      <div style={styles.badgeIcon}>{icon}</div>
+      <div>
+        <div style={styles.badgeLabel}>{label}</div>
+        <div style={styles.badgeValue}>{value}</div>
       </div>
     </div>
   );
 }
 
-/** === Styles === */
+function Step({
+  n,
+  title,
+  children,
+}: {
+  n: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={styles.step}>
+      <div style={styles.stepNum}>{n}</div>
+      <div>
+        <div style={styles.stepTitle}>{title}</div>
+        <div style={styles.stepText}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function ArchitectureSvg() {
+  return (
+    <svg role="img" aria-label="System diagram" viewBox="0 0 880 160" width="100%" height="160">
+      <defs>
+        <filter id="bpGlow" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="3" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+
+      <path d="M 210,80 L 270,80" stroke="rgba(0,229,255,0.22)" strokeWidth="2" />
+      <path d="M 450,80 L 510,80" stroke="rgba(0,229,255,0.22)" strokeWidth="2" />
+      <path d="M 670,80 L 730,80" stroke="rgba(0,229,255,0.22)" strokeWidth="2" />
+
+      <path d="M 210,80 L 270,80" stroke="rgba(0,229,255,0.95)" strokeWidth="2" strokeDasharray="5 5" className="animate-flow" />
+      <path d="M 450,80 L 510,80" stroke="rgba(255,212,0,0.95)" strokeWidth="2" strokeDasharray="5 5" className="animate-flow" />
+      <path d="M 670,80 L 730,80" stroke="rgba(72,245,180,0.95)" strokeWidth="2" strokeDasharray="5 5" className="animate-flow" />
+
+      <Node x={30} w={180} title="Web UI" sub="Next.js Client" accent="rgba(0,229,255,0.95)" />
+      <Node x={270} w={180} title="Edge API" sub="/api/cmd Proxy" accent="rgba(189,147,249,0.95)" />
+      <Node x={510} w={160} title="ESP32" sub="HTTP Gateway" accent="rgba(255,212,0,0.95)" />
+      <Node x={730} w={140} title="Arduino" sub="Hardware Control" accent="rgba(72,245,180,0.95)" />
+    </svg>
+  );
+}
+
+function Node({
+  x,
+  w,
+  title,
+  sub,
+  accent,
+}: {
+  x: number;
+  w: number;
+  title: string;
+  sub: string;
+  accent: string;
+}) {
+  return (
+    <g transform={`translate(${x}, 45)`} filter="url(#bpGlow)">
+      <rect width={w} height="70" rx="6" fill="rgba(2,10,18,0.80)" stroke={accent} strokeWidth="1.5" />
+      <rect x="8" y="8" width={w - 16} height="54" rx="4" fill="transparent" stroke="rgba(255,255,255,0.08)" strokeDasharray="4 4" />
+      <text x={w / 2} y="30" textAnchor="middle" fill="#d9f2ff" fontSize="14" fontWeight="800">{title}</text>
+      <text x={w / 2} y="50" textAnchor="middle" fill="rgba(143,182,200,0.95)" fontSize="11">{sub}</text>
+    </g>
+  );
+}
+
+/* ========= Styles ========= */
+
 const styles: Record<string, React.CSSProperties> = {
-  page: { fontFamily: 'system-ui, Segoe UI, Arial', background: '#0b0f14', color: '#fff', minHeight: '100dvh' },
-  wrap: { maxWidth: 920, margin: '0 auto', padding: 20, display: 'grid', gap: 16 },
-  estopBar: { position: 'sticky', top: 0, zIndex: 50, background: '#141a22', padding: '8px 12px', borderBottom: '1px solid #202834' },
-  estopBtn: { width: '100%', padding: '12px 16px', border: 0, borderRadius: 12, fontWeight: 800, background: '#b00020', color: '#fff' },
-  toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  toolbarRight: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
-  switchLabel: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, opacity: .9 },
-  statusStrip: { display: 'flex', gap: 8, flexWrap: 'wrap' },
-  badge: { fontSize: 12.5, background: '#1a212c', border: '1px solid #2a3545', borderRadius: 999, padding: '6px 10px' },
-  section: { display: 'grid', gap: 10 },
-  row: { display: 'flex', flexWrap: 'wrap', gap: 10 },
-  primaryBtn: { padding: '14px 16px', border: 0, borderRadius: 12, fontWeight: 700, background: '#ff7a1a', color: '#111', minWidth: 160 },
-  ghostBtn: { padding: '14px 16px', borderRadius: 12, fontWeight: 700, background: '#1a212c', color: '#eaeff7', border: '1px solid #2a3545', minWidth: 160 },
-  tiles: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 },
-  card: { background: '#0f141b', border: '1px solid #223042', borderRadius: 12, padding: 12 },
-  logHeader: { display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 },
-  logBox: { background: '#0f141b', border: '1px solid #223042', borderRadius: 12, padding: 12, maxHeight: 280, overflow: 'auto' },
-  dotWrap: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px', background: '#1a212c', border: '1px solid #2a3545', borderRadius: 999, fontSize: 12.5 },
-  dot: { width: 8, height: 8, borderRadius: 999, display: 'inline-block' },
-  logRow: { display: 'grid', gap: 10, gridTemplateColumns: 'auto auto auto auto 1fr', borderBottom: '1px dashed #1f2a39', padding: '6px 0' },
-  logTime: { opacity: .8 },
-  logMs: { opacity: .8 },
-  logCode: { fontWeight: 600 },
-  logReply: { opacity: .9 },
-  grid9: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px,1fr))', gap: 10, marginTop: 6 },
-  keyBtn: { padding: 12, borderRadius: 12, background: '#121822', color: '#eaeff7', border: '1px solid #2a3545', textAlign: 'left' },
-  labelEditor: { marginTop: 10, background: '#0f141b', border: '1px solid #223042', borderRadius: 12, padding: 12 },
-  labelGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8 },
-  labelRow: { display: 'flex', alignItems: 'center', gap: 8, background: '#0c1117', border: '1px solid #223042', borderRadius: 10, padding: '6px 8px' },
-  labelInput: { flex: 1, background: 'transparent', color: '#eaeff7', border: '1px solid #2a3545', borderRadius: 8, padding: '6px 8px' },
+  page: {
+    minHeight: "100vh",
+    background: "var(--bp)",
+    color: "var(--ink)",
+    fontFamily:
+      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+    position: "relative",
+    overflowX: "hidden",
+  },
+
+  bg: { position: "absolute", inset: 0, zIndex: 0 },
+  grain: { position: "absolute", inset: 0, zIndex: 0, pointerEvents: "none" },
+
+  wrap: {
+    position: "relative",
+    zIndex: 1,
+    maxWidth: 1080,
+    margin: "0 auto",
+    padding: "44px 18px 40px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 18,
+  },
+
+  header: {
+    textAlign: "center",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 12,
+    paddingBottom: 6,
+  },
+
+  stampWrap: { width: "100%", display: "flex", justifyContent: "center" },
+  stamp: {
+    width: "min(620px, 100%)",
+    border: "2px solid rgba(255,212,0,0.65)",
+    background: "rgba(0,0,0,0.18)",
+    padding: "10px 12px",
+    boxShadow: "0 12px 0 rgba(0,0,0,0.35)",
+  },
+  stampTop: {
+    fontSize: 11,
+    letterSpacing: "0.22em",
+    color: "rgba(255,212,0,0.9)",
+    fontWeight: 900,
+  },
+  stampMid: {
+    marginTop: 4,
+    fontSize: 14,
+    letterSpacing: "0.08em",
+    fontWeight: 900,
+    color: "var(--ink)",
+  },
+  stampBot: {
+    marginTop: 4,
+    fontSize: 11,
+    letterSpacing: "0.18em",
+    color: "rgba(143,182,200,0.95)",
+    fontWeight: 800,
+  },
+
+  title: { margin: 0, fontSize: "clamp(26px, 3.4vw, 44px)", fontWeight: 900, lineHeight: 1.1 },
+  subtitle: {
+    margin: 0,
+    maxWidth: 860,
+    color: "var(--muted)",
+    lineHeight: 1.7,
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif',
+    fontSize: 15,
+  },
+
+  btnRow: { marginTop: 6, display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" },
+  btnPrimary: { display: "inline-flex", alignItems: "center", gap: 10, borderRadius: 8, textDecoration: "none", fontWeight: 900 },
+  btnSecondary: { display: "inline-flex", alignItems: "center", gap: 10, padding: "12px 14px", textDecoration: "none", color: "var(--ink)", fontWeight: 800 },
+
+  meterRow: { marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" },
+  meter: { display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: "rgba(0,0,0,0.16)", border: "1px solid rgba(0,229,255,0.18)" },
+  meterLabel: { fontSize: 11, letterSpacing: "0.18em", fontWeight: 900, color: "rgba(143,182,200,0.95)" },
+  meterValue: { padding: "4px 8px", border: "1px solid rgba(0,229,255,0.35)", fontWeight: 900, letterSpacing: "0.08em", fontSize: 11 },
+
+  panel: { borderRadius: 10, overflow: "hidden" },
+  panelBody: { padding: 16 },
+
+  panelTitleRow: { display: "flex", alignItems: "center", gap: 12, marginBottom: 12 },
+  icon: { width: 40, height: 40, display: "grid", placeItems: "center", border: "1px solid rgba(0,229,255,0.22)", background: "rgba(0,229,255,0.06)", borderRadius: 6, fontSize: 18 },
+
+  h2: {
+    margin: 0,
+    fontSize: 16,
+    fontWeight: 900,
+    letterSpacing: "0.02em",
+    color: "var(--ink)",
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif',
+  },
+  desc: { margin: "4px 0 0 0", color: "var(--muted)", fontSize: 13, lineHeight: 1.6, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+  p: { margin: 0, color: "rgba(217,242,255,0.92)", lineHeight: 1.65, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+  small: { marginTop: 8, color: "var(--muted)", lineHeight: 1.6, fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+
+  diagramFrame: { padding: "12px 10px", border: "1px solid rgba(0,229,255,0.18)", background: "linear-gradient(180deg, rgba(0,0,0,0.18), rgba(0,0,0,0.12))" },
+
+  badges: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10, marginTop: 12 },
+  badge: { display: "flex", gap: 10, alignItems: "center", padding: "10px 10px", border: "1px solid rgba(0,229,255,0.18)", background: "rgba(0,0,0,0.16)" },
+  badgeIcon: { fontSize: 18 },
+  badgeLabel: { fontSize: 11, letterSpacing: "0.18em", fontWeight: 900, color: "rgba(143,182,200,0.95)", textTransform: "uppercase" },
+  badgeValue: { fontSize: 13, fontWeight: 800, color: "var(--ink)", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+
+  keypadGrid: { marginTop: 6, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 },
+  keypadCell: { padding: 10, border: "1px solid rgba(0,229,255,0.16)", background: "rgba(0,0,0,0.12)", transition: "transform 0.15s ease, background 0.15s ease, border-color 0.15s ease" },
+  keycap: { border: "1px solid rgba(0,229,255,0.22)", background: "linear-gradient(180deg, rgba(6,26,43,0.9), rgba(0,0,0,0.35))", borderRadius: 6, padding: "10px 10px 8px" },
+  keycapTop: { display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: 22, fontWeight: 950, letterSpacing: "0.02em" },
+  keycapLine: { marginTop: 8, height: 3, borderRadius: 999, opacity: 0.9 },
+  keyLabel: { marginTop: 8, fontSize: 12, color: "rgba(143,182,200,0.95)", fontWeight: 800, letterSpacing: "0.04em", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+
+  notice: { marginTop: 12, display: "flex", gap: 10, alignItems: "flex-start", padding: 12, border: "1px solid rgba(255,212,0,0.35)", background: "linear-gradient(90deg, rgba(255,212,0,0.10), rgba(0,0,0,0.12))" },
+  noticeIcon: { fontSize: 18, lineHeight: 1 },
+  noticeTitle: { fontWeight: 950, letterSpacing: "0.08em", color: "rgba(255,212,0,0.95)", textTransform: "uppercase", fontSize: 12 },
+  noticeText: { marginTop: 4, color: "rgba(217,242,255,0.92)", lineHeight: 1.6, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif', fontSize: 13 },
+
+  twoCol: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 18 },
+
+  timeline: { marginTop: 10, display: "flex", flexDirection: "column", gap: 10 },
+  tRow: { display: "grid", gridTemplateColumns: "56px 1fr", gap: 12, padding: "10px 10px", border: "1px solid rgba(0,229,255,0.14)", background: "rgba(0,0,0,0.12)" },
+  tIdx: { fontWeight: 950, letterSpacing: "0.12em", color: "var(--accent2)", fontSize: 12, display: "flex", alignItems: "center" },
+  tTitle: { fontWeight: 950, color: "var(--ink)", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+  tDesc: { marginTop: 3, color: "var(--muted)", fontSize: 13, lineHeight: 1.55, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+
+  linkList: { display: "flex", flexDirection: "column", gap: 10 },
+  linkRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 12px", border: "1px solid rgba(0,229,255,0.18)", background: "rgba(0,0,0,0.12)", color: "var(--ink)", textDecoration: "none", transition: "transform 0.15s ease, background 0.15s ease", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif', fontWeight: 700 },
+  arrow: { color: "var(--muted)" },
+
+  steps: { marginTop: 10, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 },
+  step: { border: "1px solid rgba(0,229,255,0.16)", background: "rgba(0,0,0,0.12)", padding: 12, display: "grid", gridTemplateColumns: "54px 1fr", gap: 12, alignItems: "start" },
+  stepNum: { fontWeight: 950, fontSize: 16, color: "var(--accent)", letterSpacing: "0.12em" },
+  stepTitle: { fontWeight: 950, color: "var(--ink)", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+  stepText: { marginTop: 6, color: "var(--muted)", lineHeight: 1.6, fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
+  code: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace', background: "rgba(0,0,0,0.35)", border: "1px solid rgba(0,229,255,0.18)", padding: "2px 6px" },
+
+  footer: { paddingTop: 14, borderTop: "1px solid rgba(0,229,255,0.16)", color: "var(--muted)", fontSize: 12, textAlign: "center", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif' },
 };
-
-/** === Utils === */
-function ts(epochMs: number) {
-  const d = new Date(epochMs);
-  return d.toLocaleTimeString();
-}
-
-function mockReply(code: CodeNum) {
-  switch (code) {
-    case CMD.RAISE: return 'ACK RAISE';
-    case CMD.LOWER: return 'ACK LOWER';
-    case CMD.STOP: return 'ACK STOP';
-    case CMD.AUTO: return 'ACK AUTO';
-    case CMD.MANUAL: return 'ACK MANUAL';
-    case CMD.ESTOP: return 'ACK ESTOP';
-    case CMD.RESET: return 'ACK RESET';
-    case CMD.RETARE: return 'ACK RETARE';
-    case CMD.BOOMGATE_OPEN: return 'ACK BOOM OPEN';
-    case CMD.BOOMGATE_CLOSE: return 'ACK BOOM CLOSE';
-    default: return 'ACK';
-  }
-}
