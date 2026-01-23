@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import Link from 'next/link';
 
 /** === Numeric command map (matches Arduino switch) ===
@@ -184,30 +184,23 @@ export default function BridgeControl() {
     };
   }, [mock]);
 
-  /** --- keyboard shortcuts --- */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (busy) return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.key >= '0' && e.key <= '9') {
-        e.preventDefault();
-        const num = Number(e.key) as CodeNum;
-        const needsManual =
-          num === CMD.RAISE ||
-          num === CMD.LOWER ||
-          num === CMD.BOOMGATE_OPEN ||
-          num === CMD.BOOMGATE_CLOSE;
-        if (needsManual && interlockMoveDisabled) return;
-        void sendCode(num);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [busy, interlockMoveDisabled]);
+  /** --- core send (memoized) --- */
+  const pushLog = useCallback((entry: LogEntry) => {
+    setLog(prev => [entry, ...prev].slice(0, 500));
+  }, []);
 
-  /** --- core send --- */
-  async function sendCode(code: CodeNum) {
+  const postSendSideEffects = useCallback((code: CodeNum, reply: string) => {
+    setLastAck(reply || '-');
+    switch (code) {
+      case CMD.AUTO: setMode('AUTO'); break;
+      case CMD.MANUAL: setMode('MANUAL'); break;
+      case CMD.STOP: setMode('IDLE'); break;
+      case CMD.ESTOP:
+        break;
+    }
+  }, []);
+
+  const sendCode = useCallback(async (code: CodeNum) => {
     if (busy) return;
     setBusy(true);
     const t0 = performance.now();
@@ -246,22 +239,31 @@ export default function BridgeControl() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [busy, mock, pushLog, postSendSideEffects]);
 
-  function postSendSideEffects(code: CodeNum, reply: string) {
-    setLastAck(reply || '-');
-    switch (code) {
-      case CMD.AUTO: setMode('AUTO'); break;
-      case CMD.MANUAL: setMode('MANUAL'); break;
-      case CMD.STOP: setMode('IDLE'); break;
-      case CMD.ESTOP:
-        break;
-    }
-  }
+  /** --- keyboard shortcuts --- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (busy) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        const num = Number(e.key) as CodeNum;
+        const needsManual =
+          num === CMD.RAISE ||
+          num === CMD.LOWER ||
+          num === CMD.BOOMGATE_OPEN ||
+          num === CMD.BOOMGATE_CLOSE;
+        if (needsManual && interlockMoveDisabled) return;
+        void sendCode(num);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, interlockMoveDisabled, sendCode]);
 
-  function pushLog(entry: LogEntry) {
-    setLog(prev => [entry, ...prev].slice(0, 500));
-  }
+
 
   function exportCSV() {
     const header = 'time,epoch_ms,code,ms,ok,reply\n';

@@ -50,8 +50,9 @@ export async function POST(req: Request) {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
-  } catch (err: any) {
-    return new Response(JSON.stringify({ ok: false, reason: String(err?.message ?? err) }), {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return new Response(JSON.stringify({ ok: false, reason: msg }), {
       status: 502,
       headers: { 'Content-Type': 'application/json' },
     });

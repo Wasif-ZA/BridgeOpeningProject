@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -17,11 +17,12 @@ export const metadata: Metadata = {
   description: "Industrial control interface for bridge opening system with ESP32 and Arduino UNO integration. Control bridge mechanisms, boom gates, and monitor sensor readings.",
   keywords: ["bridge control", "Arduino", "ESP32", "industrial control", "automation"],
   authors: [{ name: "Bridge Opening Project" }],
-  viewport: {
-    width: "device-width",
-    initialScale: 1,
-    maximumScale: 1,
-  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
 };
 
 export default function RootLayout({
