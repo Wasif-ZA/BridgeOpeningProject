@@ -1,4 +1,5 @@
-export const runtime = 'edge'; // Next.js 15+ Edge Route
+// export const runtime = 'edge'; // Removed to avoid static generation warning
+
 
 // POST /api/cmd  -> proxies JSON { op: "FORWARD", ... } to ESP32 /cmd
 export async function POST(req: Request) {
