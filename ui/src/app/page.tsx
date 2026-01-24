@@ -461,7 +461,7 @@ export default function DemoPage() {
                 <code style={styles.code}>.env.local</code> to the device static IP.
               </Step>
               <Step n="02" title="ESP32 Flash">
-                Upload sketch from <code style={styles.code}>/Arduino/esp32</code>. Ensure Wi-Fi creds are correct.
+                Upload sketch from <code style={styles.code}>/Arduino/esp32_gateway</code>. Ensure Wi-Fi creds are correct.
               </Step>
               <Step n="03" title="UNO Upload">
                 Flash the logic controller. Connect Tx/Rx pins between boards.

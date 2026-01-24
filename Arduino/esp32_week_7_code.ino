@@ -1,16 +1,23 @@
-// File: esp32_udp_ack.ino
+// File: esp32_week_7_code.ino
 #include <WiFi.h>
 #include <WiFiUDP.h>
 
+/* =========================
+   Choose ONE network mode
+   ========================= */
 
-// ESP32 as Access Point (PC connects to this Wi-Fi)
+// --- A) ESP32 as Access Point (PC connects to this Wi-Fi) ---
 const char* AP_SSID = "The internet is slow huh?";
 const char* AP_PASS = "Aaa1974$";    // must be 8+ chars
 
+// --- B) ESP32 joins your router (Station mode) ---
+// const char* STA_SSID = "YourRouterSSID";
+// const char* STA_PASS = "YourRouterPassword";
 
 WiFiUDP udp;
 const uint16_t PORT = 42100;
 
+/* -------- tiny helpers (no JSON lib) -------- */
 static String trimWS(String s) {
   s.trim(); return s;
 }
@@ -47,6 +54,16 @@ void setup() {
   bool ok = WiFi.softAP(AP_SSID, AP_PASS);
   Serial.println(ok ? "[AP] started" : "[AP] failed");
   Serial.print("[AP] IP: "); Serial.println(WiFi.softAPIP());
+
+  // ===== B) Station mode (use instead of AP if you prefer) =====
+  /*
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(STA_SSID, STA_PASS);
+  Serial.print("Joining WiFi");
+  while (WiFi.status() != WL_CONNECTED) { delay(400); Serial.print("."); }
+  Serial.println("\n[STA] connected");
+  Serial.print("[STA] IP: "); Serial.println(WiFi.localIP());
+  */
 
   if (udp.begin(PORT)) {
     Serial.print("UDP listening on "); Serial.println(PORT);
