@@ -99,4 +99,4 @@ This project is available under the MIT License. See `LICENSE` for details.
 
 ## Contact
 - GitHub: [@Wasif-ZA](https://github.com/Wasif-ZA)
-- LinkedIn: Add your profile link here
+- LinkedIn: https://www.linkedin.com/in/wasif-zaman-4228b5245/
