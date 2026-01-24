@@ -12,7 +12,7 @@ Next.js UI (`ui/src/app`)
 API Proxy (`ui/src/app/api/cmd/route.ts`)
    │  POST { op }
    ▼
-ESP32 Gateway (`Arduino/esp32_gateway*`)
+ESP32 Gateway (`Arduino/esp32*`)
    │  serial / control frames
    ▼
 Arduino Actuator (`Arduino/uno`)
@@ -37,7 +37,7 @@ Arduino Actuator (`Arduino/uno`)
   - Returns structured JSON responses for UI consumption
 
 ### 3) ESP32 Gateway Firmware
-- Location: `Arduino/esp32_gateway`, `Arduino/esp32_gateway_udp_ack`
+- Location: `Arduino/esp32`, `Arduino/esp32_udp_ack`
 - Purpose: Accept network commands and translate them into actuator-friendly signals.
 
 ### 4) Arduino Actuator Firmware
