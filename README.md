@@ -26,7 +26,6 @@ It is designed for engineering reviewers, recruiters, and teammates who want to 
 - **Tooling:** ESLint (flat config), Node test runner, GitHub Actions CI
 
 ## Architecture Overview
-![Architecture diagram placeholder](docs/assets/architecture-placeholder.png)
 
 At a high level, the operator UI sends commands to a Next.js route handler, which validates input, applies timeouts, and forwards commands to the ESP32 gateway. The ESP32 then communicates with the Arduino actuator layer. A CLI in `scripts/udp_cli.py` provides a backup diagnostic path during bring-up. See `/docs/ARCHITECTURE.md` for more detail.
 
