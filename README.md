@@ -1,131 +1,102 @@
+Bridge Opening Project
+A portfolio-ready, full-stack IoT demonstration that controls a model opening bridge via a Next.js operator console and embedded firmware.
 
----
+## Problem / Why
+Opening bridges require coordination between traffic safety, operator intent, and mechanical actuation. This project demonstrates a clear, testable control chain that:
+- provides a professional operator interface,
+- enforces safety-minded interlocks at the UI layer, and
+- integrates cleanly with ESP32 and Arduino firmware.
 
-# BladeRunner — Carriage Control System
+It is designed for engineering reviewers, recruiters, and teammates who want to understand both the product and the system design quickly.
 
-**A full-stack implementation of a carriage control loop, bridging the gap between embedded firmware, Java-based control logic, and modern web operations.**
+## What it does (Features)
+- Operator-friendly overview page that explains the system and bring-up steps.
+- Dedicated control panel with manual vs. auto modes.
+- Command logging with round-trip timing feedback.
+- Connectivity heartbeat to surface online/offline state.
+- API proxy that hides device URLs from the browser.
+- Structured error responses for missing configuration and upstream failures.
+- Embedded firmware folders for gateway and actuator roles.
+- Lightweight UDP CLI for hardware diagnostics.
 
----
+## Tech Stack
+- **Frontend:** Next.js 15 (App Router), React 19, TypeScript
+- **Backend / API layer:** Next.js Route Handlers (`/api/cmd` proxy)
+- **Device / firmware:** ESP32 gateway + Arduino actuator sketches
+- **Tooling:** ESLint (flat config), Node test runner, GitHub Actions CI
 
-## The Engineering Challenge
+## Architecture Overview
 
-Embedded systems often suffer from the "Black Box" problem: the hardware logic is isolated, making it difficult for stakeholders to visualize state changes, debug race conditions, or evaluate the system without physical access.
 
-**BladeRunner** solves this by decoupling the control logic from the physical hardware. It introduces a high-fidelity simulation layer and a reactive web dashboard, allowing the entire control loop to be visualized, audited, and demonstrated in a browser environment.
+At a high level, the operator UI sends commands to a Next.js route handler, which validates input, applies timeouts, and forwards commands to the ESP32 gateway. The ESP32 then communicates with the Arduino actuator layer. A CLI in `scripts/udp_cli.py` provides a backup diagnostic path during bring-up. See `/docs/ARCHITECTURE.md` for more detail.
 
-This project serves as a proof-of-concept for:
+Key modules/services:
+- `ui/src/app/` — operator UI routes
+- `ui/src/app/api/cmd/route.ts` — device proxy and error handling
+- `Arduino/` — ESP32 and Arduino sketches
+- `scripts/udp_cli.py` — network diagnostics tool
 
-* **Full-Stack Cohesion:** Integrating C++, Java, and TypeScript into a unified pipeline.
-* **State Management:** Handling complex carriage transitions safely and predictably.
-* **Developer Experience:** Reducing the time-to-understanding for new engineers and reviewers.
+## How to Run Locally
+### Prereqs
+- Node.js 20+
+- npm 10+
+- (Optional) ESP32 device reachable on your network
 
-## System Architecture
-
-BladeRunner operates as a multi-tier distributed system. Data flows from the operator to the simulated processor, and finally to the hardware layer.
-
-```text
-[ OPERATOR ]
-     |
-     v
-[ OPERATIONS UI ]         <-- Next.js 16 Dashboard
-     |                        (Visualizes state, issues commands)
-     v
-[ CONTROL PLANE ]         <-- Java (CCP)
-     |                        (Parses JSON, manages state machine, UDP transport)
-     v
-[ HARDWARE LAYER ]        <-- ESP32 Firmware
-     |                        (Executes physical actuation)
-     v
-[ PHYSICAL WORLD ]        <-- Motors / Sensors
-
+### Install
+```bash
+cd ui
+npm install
 ```
 
-For a deep dive into the data flow and component interaction, refer to [`docs/ARCHITECTURE.md`](https://www.google.com/search?q=docs/ARCHITECTURE.md).
+### Run
+```bash
+cd ui
+cp .env.example .env.local
+npm run dev
+```
+Then open `http://localhost:3000`.
 
-## Technical Highlights
+### Build / Test commands
+```bash
+cd ui
+npm run lint
+npm run test
+npm run build
+```
 
-### 1. The Operations Dashboard (Frontend)
-
-Built with **Next.js 16**, **React 19**, and **Tailwind CSS**, the UI is not just a mockup—it is a functional control surface.
-
-* **Real-time Visualization:** Displays the current state of the carriage (Open, Closed, Moving, Locked).
-* **Command Interface:** meaningful abstraction of complex binary commands into user-friendly controls.
-* **Modern Stack:** Utilizes server-side rendering and rigorous TypeScript typing.
-
-### 2. The Control Processor (Backend)
-
-Written in **Java (JDK 11+)**, this layer acts as the brain of the operation.
-
-* **UDP Networking:** Implements low-latency message handling.
-* **JSON Serialization:** robust encoding/decoding of command packets using `org.json`.
-* **State Machine:** Explicitly models valid transitions to prevent illegal hardware states.
-
-### 3. The Embedded Layer (Firmware)
-
-Targeting the **ESP32**, the firmware layer translates high-level logic into electrical signals.
-
-* **C/C++ Integration:** Scaffolding for hardware interrupts and GPIO management.
-
-## Engineering Standards & Documentation
-
-This repository is structured to mimic a production-grade engineering environment. A key focus was placed on **traceability** and **onboarding speed**.
-
-* **Decision Logs:** All major architectural choices are recorded in [`docs/DECISIONS.md`](https://www.google.com/search?q=docs/DECISIONS.md). This tracks the *why* behind the *how*, covering trade-offs between protocols and stack choices.
-* **CI/CD:** GitHub Actions pipelines ensure the web surface remains buildable and lint-free on every commit.
-* **Clean Architecture:** Distinct separation of concerns between the UI, Logic, and Hardware layers allows for independent testing and scaling.
-
-## Quick Start (Local Simulation)
-
-### Prerequisites
-
-* **Node.js 20+**
-* **Java JDK 11+**
-
-### 1. Launch the Operations UI
-
-The UI acts as the entry point for the simulation.
+## Configuration
+Copy the example environment file and update it for your device:
 
 ```bash
-npm --prefix website/code ci
-npm --prefix website/code run dev
-
+cd ui
+cp .env.example .env.local
 ```
 
-> Access the dashboard at **http://localhost:3000**
+Required variables:
+- `ESP32_BASE_URL` — Base URL of the ESP32 gateway (for example, `http://192.168.4.1`).
 
-### 2. Compile the Control Processor
+## Screenshots / Demo
+Screenshots are documented but not committed as binaries in this environment. See `docs/assets/README.md` for capture steps and expected filenames.
 
-To run the backend simulation logic:
+- `docs/assets/screenshot-home.png`
+- `docs/assets/screenshot-feature.png`
 
-```bash
-cd CCP
-javac -cp "lib/json-20240303.jar" *.java
+## Key Decisions (Engineering)
+- Use a Next.js route handler as a proxy to keep device URLs out of the browser.
+- Apply explicit request timeouts to avoid hanging the operator UI.
+- Keep command codes numeric to align with embedded constraints.
+- Gate bridge motion behind manual mode to communicate safety intent clearly.
+- Provide a CLI fallback for hardware diagnostics when the UI is unavailable.
 
-```
-
-### 3. Verify System Integrity
-
-Run the test suite to ensure the frontend logic is sound.
-
-```bash
-npm --prefix website/code run test
-
-```
-
-## Future Roadmap
-
-* **Protocol Hardening:** implementing a shared schema validation between Java and TypeScript to ensure type safety across the network boundary.
-* **Simulation Expansion:** Extending the Java layer to simulate hardware faults (e.g., door obstructions) for better stress testing.
-* **Telemetry:** Adding a time-series log of events to the UI for post-incident analysis.
+## Roadmap / Next Improvements
+- Add hardware-in-the-loop test notes and simulated device responses.
+- Extract shared command definitions into a single typed module.
+- Add status polling endpoints for richer, live telemetry.
+- Record a short demo GIF that shows a full open/close cycle.
 
 ## License
+This project is available under the MIT License. See `LICENSE` for details.
 
-Distributed under the MIT License. See `LICENSE` for more information.
-
----
-
-**Wasif Zaman**
-
-* **GitHub:** [@Wasif-ZA](https://github.com/Wasif-ZA)
-* **LinkedIn:** [Wasif Zaman](https://www.linkedin.com/in/wasif-zaman-4228b5245/)
-* **Email:** wasif.zaman1@gmail.com
+## Contact
+- GitHub: [@Wasif-ZA](https://github.com/Wasif-ZA)
+- LinkedIn: [profile](https://www.linkedin.com/in/wasif-zaman-4228b5245/)
