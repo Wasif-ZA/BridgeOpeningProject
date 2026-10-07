@@ -1,102 +1,127 @@
-Bridge Opening Project
-A portfolio-ready, full-stack IoT demonstration that controls a model opening bridge via a Next.js operator console and embedded firmware.
+<p align="center">
+  <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
+  <a href="#how-it-works"><strong>How it works</strong></a> &middot;
+  <a href="#configuration"><strong>Configuration</strong></a> &middot;
+  <a href="#docs"><strong>Docs</strong></a>
+</p>
 
-## Problem / Why
-Opening bridges require coordination between traffic safety, operator intent, and mechanical actuation. This project demonstrates a clear, testable control chain that:
-- provides a professional operator interface,
-- enforces safety-minded interlocks at the UI layer, and
-- integrates cleanly with ESP32 and Arduino firmware.
+<p align="center">
+  <img src="https://img.shields.io/badge/UI-Next.js%2015-000000" alt="Next.js 15">
+  <img src="https://img.shields.io/badge/firmware-ESP32%20%2B%20Arduino-00979D" alt="ESP32 and Arduino">
+  <img src="https://img.shields.io/badge/hardware-optional%20(mock%20mode)-1a7f64" alt="Mock mode, no hardware needed">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
+</p>
 
-It is designed for engineering reviewers, recruiters, and teammates who want to understand both the product and the system design quickly.
+<br>
 
-## What it does (Features)
-- Operator-friendly overview page that explains the system and bring-up steps.
-- Dedicated control panel with manual vs. auto modes.
-- Command logging with round-trip timing feedback.
-- Connectivity heartbeat to surface online/offline state.
-- API proxy that hides device URLs from the browser.
-- Structured error responses for missing configuration and upstream failures.
-- Embedded firmware folders for gateway and actuator roles.
-- Lightweight UDP CLI for hardware diagnostics.
+# The Bridge Opening Project opens a model bridge from a browser.
 
-## Tech Stack
-- **Frontend:** Next.js 15 (App Router), React 19, TypeScript
-- **Backend / API layer:** Next.js Route Handlers (`/api/cmd` proxy)
-- **Device / firmware:** ESP32 gateway + Arduino actuator sketches
-- **Tooling:** ESLint (flat config), Node test runner, GitHub Actions CI
+An operator console in Next.js, an ESP32 gateway and an Arduino that moves the bridge.
 
-## Architecture Overview
+**If the bridge is the _drawbridge_, this is the _bridge keeper's desk_.**
 
+The operator sends a command from the console. A Next.js route checks it, adds a timeout, and
+forwards it to the ESP32. The ESP32 passes it to the Arduino, which drives the motors. Bridge
+motion only works in manual mode.
 
-At a high level, the operator UI sends commands to a Next.js route handler, which validates input, applies timeouts, and forwards commands to the ESP32 gateway. The ESP32 then communicates with the Arduino actuator layer. A CLI in `scripts/udp_cli.py` provides a backup diagnostic path during bring-up. See `/docs/ARCHITECTURE.md` for more detail.
+**Run the whole console with no hardware: switch on Mock.**
 
-Key modules/services:
-- `ui/src/app/` — operator UI routes
-- `ui/src/app/api/cmd/route.ts` — device proxy and error handling
-- `Arduino/` — ESP32 and Arduino sketches
-- `scripts/udp_cli.py` — network diagnostics tool
+|        | Step          | Example                                          |
+| ------ | ------------- | ------------------------------------------------ |
+| **01** | Install       | _`cd ui && npm install`_                         |
+| **02** | Run           | _`cp .env.example .env.local && npm run dev`_    |
+| **03** | Try it        | _Open `/control`, switch on **Mock**, send a command._ |
 
-## How to Run Locally
-### Prereqs
-- Node.js 20+
-- npm 10+
-- (Optional) ESP32 device reachable on your network
+> [!TIP]
+> **🌉 Or hand it to your agent.** Paste this into Claude Code or Codex:
+>
+> ```text
+> Clone https://github.com/Wasif-ZA/BridgeOpeningProject, run `npm install` in ui/,
+> copy .env.example to .env.local, run `npm run dev`, and open /control with Mock on.
+> ```
 
-### Install
-```bash
-cd ui
-npm install
+<br>
+
+## Problems it solves
+
+| Without it | With it |
+| --- | --- |
+| ❌ The browser talks straight to the device, and its address leaks. | ✅ `/api/cmd` proxies every command; the device URL stays on the server. |
+| ❌ A dead device hangs the operator screen. | ✅ Requests time out, and a heartbeat shows online or offline. |
+| ❌ Any input reaches the firmware. | ✅ `op` must be a command code `0` to `9`, or the proxy returns 400. |
+| ❌ You cannot demo without the bridge on the desk. | ✅ Mock mode returns simulated `ACK` replies in the browser. |
+| ❌ The UI is down during bring-up. | ✅ `scripts/udp_cli.py` sends commands over UDP directly. |
+
+<br>
+
+## How it works
+
+```
+Operator console (ui/src/app)
+        │
+        ▼
+/api/cmd proxy        validates op 0-9, applies a timeout
+        │             400 bad input, 500 no config, 502 upstream failure
+        ▼
+ESP32 gateway (Arduino/)
+        │
+        ▼
+Arduino actuator  ──▶  bridge motors
+
+scripts/udp_cli.py  ──UDP──▶  ESP32   (backup path for diagnostics)
 ```
 
-### Run
+<details>
+<summary>Open: the console</summary>
+
+- An overview page that explains the system and the bring-up steps.
+- A control panel with manual and auto modes. Motion is gated behind manual.
+- A command log with round-trip timing.
+- A connectivity heartbeat.
+
+Stack: Next.js 15 (App Router), React 19, TypeScript, ESLint flat config, Node's built-in test
+runner (`tests/cmd-route.test.mjs` covers the proxy), GitHub Actions CI.
+
+</details>
+
+<br>
+
+## Quickstart
+
+Node.js 22.18+ (the tests import TypeScript through Node's type stripping) and npm 10+.
+
 ```bash
-cd ui
+git clone https://github.com/Wasif-ZA/BridgeOpeningProject
+cd BridgeOpeningProject/ui
+npm install
 cp .env.example .env.local
 npm run dev
 ```
-Then open `http://localhost:3000`.
 
-### Build / Test commands
-```bash
-cd ui
-npm run lint
-npm run test
-npm run build
-```
+Open http://localhost:3000.
 
 ## Configuration
-Copy the example environment file and update it for your device:
 
-```bash
-cd ui
-cp .env.example .env.local
-```
+| Variable | Meaning |
+| --- | --- |
+| `ESP32_BASE_URL` | The ESP32 gateway, for example `http://192.168.4.1`. Needed for live mode. Unset, `/api/cmd` returns 500 and the console shows Offline unless Mock is on. |
 
-Required variables:
-- `ESP32_BASE_URL` — Base URL of the ESP32 gateway (for example, `http://192.168.4.1`).
+## Roadmap
 
-## Screenshots / Demo
-Screenshots are documented but not committed as binaries in this environment. See `docs/assets/README.md` for capture steps and expected filenames.
+- ⬜ Hardware-in-the-loop test notes and server-side simulated replies
+- ⬜ One typed module for the command codes
+- ⬜ Status polling for live telemetry
+- ⬜ A demo GIF of a full open and close
 
-- `docs/assets/screenshot-home.png`
-- `docs/assets/screenshot-feature.png`
+## Docs
 
-## Key Decisions (Engineering)
-- Use a Next.js route handler as a proxy to keep device URLs out of the browser.
-- Apply explicit request timeouts to avoid hanging the operator UI.
-- Keep command codes numeric to align with embedded constraints.
-- Gate bridge motion behind manual mode to communicate safety intent clearly.
-- Provide a CLI fallback for hardware diagnostics when the UI is unavailable.
+1. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): the control chain in detail.
+2. [`docs/DECISIONS.md`](docs/DECISIONS.md): why the proxy, timeouts and numeric codes.
+3. [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md): the project at a glance.
+4. [`docs/assets/README.md`](docs/assets/README.md): how to capture screenshots.
 
-## Roadmap / Next Improvements
-- Add hardware-in-the-loop test notes and simulated device responses.
-- Extract shared command definitions into a single typed module.
-- Add status polling endpoints for richer, live telemetry.
-- Record a short demo GIF that shows a full open/close cycle.
+Tests: `npm run lint`, `npm run test`, `npm run build` in `ui/`.
 
 ## License
-This project is available under the MIT License. See `LICENSE` for details.
 
-## Contact
-- GitHub: [@Wasif-ZA](https://github.com/Wasif-ZA)
-- LinkedIn: [profile](https://www.linkedin.com/in/wasif-zaman-4228b5245/)
+MIT. See [`LICENSE`](LICENSE).

@@ -417,7 +417,7 @@ export default function DemoPage() {
                   <a
                     style={styles.linkRow}
                     className="row"
-                    href="https://github.com/Wasif-ZA/BridgeOpeningProject/tree/main/Audrino"
+                    href="https://github.com/Wasif-ZA/BridgeOpeningProject/tree/main/Arduino"
                     target="_blank"
                     rel="noreferrer"
                   >

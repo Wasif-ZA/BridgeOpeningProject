@@ -1,66 +1,63 @@
-// export const runtime = 'edge'; // Removed to avoid static generation warning
+const UPSTREAM_TIMEOUT_MS = 2000;
+const VALID_OP = /^[0-9]$/;
 
-
-// POST /api/cmd  -> proxies JSON { op: "FORWARD", ... } to ESP32 /cmd
-export async function POST(req: Request) {
-  try {
-    const { op, ...rest } = await req.json();
-    if (!op) {
-      return new Response(JSON.stringify({ ok: false, reason: 'missing op' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    const base = process.env.ESP32_BASE_URL;
-    if (!base) {
-      return new Response(JSON.stringify({ ok: false, reason: 'ESP32_BASE_URL not set' }), {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-
-    let data: unknown = {};
-    try {
-      const espRes: Response = await fetch(`${base}/cmd`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op, ...rest }),
-        signal: controller.signal,
-        cache: 'no-store',
-      });
-      clearTimeout(timeoutId);
-
-      try {
-        data = await espRes.json();
-      } catch {
-        data = {};
-      }
-    } catch (e) {
-      clearTimeout(timeoutId);
-      return new Response(JSON.stringify({ ok: false, error: String(e) }), {
-        status: 502,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-
-    return new Response(JSON.stringify({ ok: true, proxied: true, esp32: data }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ ok: false, reason: msg }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+function json(body: unknown, status: number) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
-// Optional: preflight if you ever call this cross-origin
+// POST /api/cmd  -> validates { op: "0".."9" } and proxies it to ESP32 /cmd
+export async function POST(req: Request) {
+  let payload: Record<string, unknown>;
+  try {
+    payload = await req.json();
+  } catch {
+    return json({ ok: false, reason: 'invalid JSON body' }, 400);
+  }
+  if (!payload || typeof payload !== 'object') {
+    return json({ ok: false, reason: 'invalid JSON body' }, 400);
+  }
+
+  const { op: rawOp, ...rest } = payload;
+  if (rawOp === undefined || rawOp === null || rawOp === '') {
+    return json({ ok: false, reason: 'missing op' }, 400);
+  }
+  const op = String(rawOp);
+  if (!VALID_OP.test(op)) {
+    return json({ ok: false, reason: `invalid op "${op}", expected a code 0-9` }, 400);
+  }
+
+  const base = process.env.ESP32_BASE_URL?.replace(/\/+$/, '');
+  if (!base) {
+    return json({ ok: false, reason: 'ESP32_BASE_URL not set' }, 500);
+  }
+
+  let espRes: Response;
+  try {
+    espRes = await fetch(`${base}/cmd`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...rest, op }),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      cache: 'no-store',
+    });
+  } catch (e) {
+    return json({ ok: false, reason: 'ESP32 unreachable', error: String(e) }, 502);
+  }
+
+  let data: Record<string, unknown> = {};
+  try {
+    data = await espRes.json();
+  } catch {
+    data = {};
+  }
+
+  const ok = espRes.ok && data?.ok !== false;
+  return json({ ok, proxied: true, status: espRes.status, esp32: data }, espRes.ok ? 200 : 502);
+}
+
 export async function OPTIONS() {
   return new Response(null, {
     status: 204,
